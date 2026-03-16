@@ -31,21 +31,19 @@ rclone config  # follow prompts, name the remote "dropbox"
 ## Usage
 
 ```bash
-# Inspect
+# Inspection — all accept --json for machine-readable output
 python3 sp_edit.py dump                            # list all tasks
-python3 sp_edit.py dump-today                      # list today's tasks with est/spent time
-python3 sp_edit.py dump-repeats                    # list all recurring task configs
-python3 sp_edit.py dump-projects                   # list all projects
-python3 sp_edit.py dump-tags                       # list all tags
-python3 sp_edit.py dump-project "Project"          # tasks in a specific project
-python3 sp_edit.py dump-tag "Tag"                  # tasks with a specific tag
+python3 sp_edit.py dump-today                      # today's tasks with est/spent time
+python3 sp_edit.py dump-repeats                    # recurring task configs
+python3 sp_edit.py dump-projects                   # all projects
+python3 sp_edit.py dump-tags                       # all tags
+python3 sp_edit.py dump-project "Project"          # tasks in a project
+python3 sp_edit.py dump-tag "Tag"                  # tasks with a tag
 python3 sp_edit.py dump-backlog "Project"          # backlog tasks for a project
-python3 sp_edit.py dump-notes                      # list all notes
-python3 sp_edit.py dump-counters                   # list simple counters with today's value
-python3 sp_edit.py dump-archive                    # list archived tasks
-
-# All dump-* commands accept --json for machine-readable output
-python3 sp_edit.py dump-today --json
+python3 sp_edit.py dump-notes                      # all notes
+python3 sp_edit.py dump-counters                   # simple counters with today's value
+python3 sp_edit.py dump-archive                    # archived tasks
+python3 sp_edit.py dump-today --json               # example: machine-readable output
 
 # Raw access
 python3 sp_edit.py pull                            # download -> /tmp/sp_state.json
@@ -56,15 +54,37 @@ python3 sp_edit.py pull-push "<python-expr>"       # one-liner (has `state` vari
 python3 sp_edit.py add-task "Title"                # add to Inbox, scheduled today
 python3 sp_edit.py add-task "Title" "Project"      # specific project
 python3 sp_edit.py add-task "Title" "Project" 2026-04-01   # specific date
-python3 sp_edit.py add-task "Title" "Project" none # no scheduling
+python3 sp_edit.py add-task "Title" "Project" none # unscheduled
 
 python3 sp_edit.py complete-task "Title or ID"
 python3 sp_edit.py delete-task "Title or ID"
 
-# Update any task field (values are JSON — strings need inner quotes)
 python3 sp_edit.py update-task "Title or ID" title='"New title"'
 python3 sp_edit.py update-task "Title or ID" dueDay='"2026-04-01"'
 python3 sp_edit.py update-task "Title or ID" timeEstimate=1800000
+
+python3 sp_edit.py unschedule-task "Title or ID"
+python3 sp_edit.py reschedule-task "Title or ID" 2026-04-01
+
+python3 sp_edit.py tag-task "Title or ID" "Tag"
+python3 sp_edit.py untag-task "Title or ID" "Tag"
+
+python3 sp_edit.py set-task-notes "Title or ID" "Markdown text"
+python3 sp_edit.py clear-task-notes "Title or ID"
+
+python3 sp_edit.py move-to-backlog "Title or ID"
+python3 sp_edit.py move-from-backlog "Title or ID"
+
+python3 sp_edit.py move-task-up "Title or ID"
+python3 sp_edit.py move-task-down "Title or ID"
+python3 sp_edit.py move-task-to-top "Title or ID"
+python3 sp_edit.py move-task-to-bottom "Title or ID"
+
+# Subtasks
+python3 sp_edit.py add-subtask "Title" "ParentTitle or ID"
+python3 sp_edit.py complete-subtask "Title or ID"
+python3 sp_edit.py delete-subtask "Title or ID"
+python3 sp_edit.py move-subtask "Title or ID" "NewParentTitle or ID"
 
 # Recurring tasks
 python3 sp_edit.py add-repeat "Standup" Work DAILY mon,tue,wed,thu,fri 09:30 15
@@ -78,6 +98,39 @@ python3 sp_edit.py delete-repeat "Standup"
 # Projects
 python3 sp_edit.py add-project "Title"
 python3 sp_edit.py update-project "Title or ID" title='"New title"'
+python3 sp_edit.py delete-project "Title or ID"       # deletes all tasks too
+python3 sp_edit.py archive-project "Title or ID"
+python3 sp_edit.py unarchive-project "Title or ID"
+
+# Tags
+python3 sp_edit.py add-tag "Title"
+python3 sp_edit.py add-tag "Title" "#ff4081"           # with color
+python3 sp_edit.py update-tag "Title or ID" title='"New name"'
+python3 sp_edit.py delete-tag "Title or ID"            # strips tag from all tasks
+
+# Notes
+python3 sp_edit.py add-note "Title"
+python3 sp_edit.py add-note "Title" "Project" "Markdown content"
+python3 sp_edit.py update-note "Title or ID" content='"Updated text"'
+python3 sp_edit.py delete-note "Title or ID"
+python3 sp_edit.py pin-note "Title or ID"
+python3 sp_edit.py unpin-note "Title or ID"
+
+# Simple counters
+python3 sp_edit.py add-counter "Title"                 # type defaults to 'clicks'
+python3 sp_edit.py add-counter "Title" number
+python3 sp_edit.py increment-counter "Title or ID"
+python3 sp_edit.py increment-counter "Title or ID" 3
+python3 sp_edit.py decrement-counter "Title or ID"
+python3 sp_edit.py set-counter "Title or ID" 5
+python3 sp_edit.py delete-counter "Title or ID"
+
+# Batch operations
+python3 sp_edit.py complete-done-today                 # complete all of today's tasks
+python3 sp_edit.py delete-done-tasks                   # delete all completed tasks
+python3 sp_edit.py delete-done-tasks "Project"         # scoped to a project
+python3 sp_edit.py move-done-to-archive                # move done tasks to archiveYoung
+python3 sp_edit.py restore-task "Title or ID"          # restore from archive
 ```
 
 ### `add-repeat` day syntax
@@ -87,6 +140,37 @@ python3 sp_edit.py update-project "Title or ID" title='"New title"'
 | `mon,tue,wed,thu,fri` | specific days (3-letter abbreviations) |
 | `weekdays` | Monday–Friday |
 | `all` | every day |
+
+### Global flags
+
+Flags can be combined with any command:
+
+| Flag | Effect |
+|---|---|
+| `--json` | Machine-readable JSON output (dump-* commands) |
+| `--dry-run` | Preview changes without uploading |
+| `--no-pull` | Skip download, use cached `/tmp/sp_state.json` |
+| `--no-push` | Save changes locally but don't upload |
+
+## Configuration
+
+Override defaults via `~/.sp_edit.conf` (JSON) or environment variables:
+
+```json
+{
+  "SP_EDIT_REMOTE": "dropbox",
+  "SP_EDIT_REMOTE_PATH": "Apps/super_productivity/sync-data.json",
+  "SP_EDIT_CLIENT_ID": "C_claud"
+}
+```
+
+| Env var | Default |
+|---|---|
+| `SP_EDIT_REMOTE` | `dropbox` |
+| `SP_EDIT_REMOTE_PATH` | `Apps/super_productivity/sync-data.json` |
+| `SP_EDIT_CLIENT_ID` | `C_claud` |
+| `SP_EDIT_LOCAL_RAW` | `/tmp/sp_raw.json` |
+| `SP_EDIT_LOCAL_STATE` | `/tmp/sp_state.json` |
 
 ## Internals
 
@@ -102,7 +186,7 @@ The JSON has these key fields at the root:
 
 | Field | Purpose |
 |---|---|
-| `state` | Full app state (tasks, projects, tags, planner, etc.) |
+| `state` | Full app state (tasks, projects, tags, planner, notes, counters, etc.) |
 | `recentOps` | Ordered log of the last 500 operations |
 | `vectorClock` | Per-client version counters (e.g. `{"desktop": 2290, "mobile": 46}`) |
 | `syncVersion` | Monotonically increasing integer, bumped on every push |
@@ -122,6 +206,16 @@ When SP syncs, it replays `recentOps` from remote onto its local state rather th
 | `HRC` | `DEL` | `TASK_REPEAT_CFG` | Delete repeat config |
 | `PA` | `CRT` | `PROJECT` | Create project |
 | `PC` | `UPD` | `PROJECT` | Update project |
+| `PDM` | `DEL` | `PROJECT` | Delete project |
+| `TGA` | `CRT` | `TAG` | Create tag |
+| `TGU` | `UPD` | `TAG` | Update tag |
+| `TGDM` | `DEL` | `TAG` | Delete tag |
+| `NA` | `CRT` | `NOTE` | Create note |
+| `NU` | `UPD` | `NOTE` | Update note |
+| `NDM` | `DEL` | `NOTE` | Delete note |
+| `SCA` | `CRT` | `SIMPLE_COUNTER` | Create counter |
+| `SCU` | `UPD` | `SIMPLE_COUNTER` | Update counter |
+| `SCDM` | `DEL` | `SIMPLE_COUNTER` | Delete counter |
 
 ### Scheduling a task for a specific day
 
