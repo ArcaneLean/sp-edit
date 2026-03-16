@@ -795,12 +795,13 @@ def delete_task(title_or_id):
     if task_id in state["task"]["ids"]:
         state["task"]["ids"].remove(task_id)
 
-    # Remove from project
+    # Remove from project (both active and backlog)
     proj_id = task.get("projectId")
     if proj_id and proj_id in state["project"]["entities"]:
-        task_ids = state["project"]["entities"][proj_id].get("taskIds", [])
-        if task_id in task_ids:
-            task_ids.remove(task_id)
+        proj = state["project"]["entities"][proj_id]
+        for lst in ("taskIds", "backlogTaskIds"):
+            if task_id in proj.get(lst, []):
+                proj[lst].remove(task_id)
 
     # Remove from all tags
     for tag in state["tag"]["entities"].values():
