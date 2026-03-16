@@ -156,6 +156,21 @@ All dump-* commands accept --json for machine-readable output.
 
     python3 sp_edit.py unpin-note "Title or ID"
         Unpin a note from today.
+
+    python3 sp_edit.py add-counter "Title" [clicks|number]
+        Create a simple counter (default type: clicks).
+
+    python3 sp_edit.py delete-counter "Title or ID"
+        Delete a counter.
+
+    python3 sp_edit.py increment-counter "Title or ID" [amount]
+        Increment today's counter value by amount (default 1).
+
+    python3 sp_edit.py decrement-counter "Title or ID" [amount]
+        Decrement today's counter value by amount (default 1).
+
+    python3 sp_edit.py set-counter "Title or ID" <value>
+        Set today's counter value to an exact number.
 """
 
 import base64, gzip, json, subprocess, sys, time, random, string, uuid
@@ -1228,6 +1243,139 @@ def unpin_note(title_or_id):
 
 
 # ---------------------------------------------------------------------------
+# Phase 5 — Simple Counters
+# ---------------------------------------------------------------------------
+
+def _find_counter(state, title_or_id):
+    counters = state.get("simpleCounter", {}).get("entities", {})
+    if title_or_id in counters:
+        return title_or_id, counters[title_or_id]
+    needle = title_or_id.lower()
+    matches = [(cid, c) for cid, c in counters.items() if c.get("title", "").lower() == needle]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        print(f"Error: multiple counters match '{title_or_id}':")
+        for cid, c in matches:
+            print(f"  {cid}  {c['title']}")
+        sys.exit(1)
+    partial = [(cid, c) for cid, c in counters.items() if needle in c.get("title", "").lower()]
+    if len(partial) == 1:
+        return partial[0]
+    if len(partial) > 1:
+        print(f"Error: multiple counters partially match '{title_or_id}':")
+        for cid, c in partial:
+            print(f"  {cid}  {c['title']}")
+        sys.exit(1)
+    print(f"Error: no counter found matching '{title_or_id}'")
+    sys.exit(1)
+
+
+def add_counter(title, counter_type="clicks"):
+    parsed = pull()
+    state = parsed["state"]
+
+    counter_id = _new_task_id()
+    counters = state.setdefault("simpleCounter", {})
+    existing = counters.get("entities", {})
+    order = max((c.get("order", 0) for c in existing.values()), default=-1) + 1
+
+    counter = {
+        "id": counter_id,
+        "title": title,
+        "type": counter_type,
+        "countOnDay": {},
+        "order": order,
+    }
+
+    _make_op(parsed, "CRT", "SIMPLE_COUNTER", "SCA", {"simpleCounter": counter}, counter_id)
+
+    counters.setdefault("entities", {})[counter_id] = counter
+    counters.setdefault("ids", []).append(counter_id)
+
+    _save(parsed)
+    push()
+    print(f"Created counter '{title}' (type={counter_type}, id={counter_id})")
+
+
+def delete_counter(title_or_id):
+    parsed = pull()
+    state = parsed["state"]
+
+    counter_id, counter = _find_counter(state, title_or_id)
+
+    _make_op(parsed, "DEL", "SIMPLE_COUNTER", "SCDM", {"counterIds": [counter_id]}, counter_id)
+
+    del state["simpleCounter"]["entities"][counter_id]
+    if counter_id in state["simpleCounter"].get("ids", []):
+        state["simpleCounter"]["ids"].remove(counter_id)
+
+    _save(parsed)
+    push()
+    print(f"Deleted counter '{counter['title']}'")
+
+
+def _set_counter_value(title_or_id, value):
+    parsed = pull()
+    state = parsed["state"]
+    today = str(date.today())
+
+    counter_id, counter = _find_counter(state, title_or_id)
+    counter.setdefault("countOnDay", {})[today] = value
+
+    _make_op(parsed, "UPD", "SIMPLE_COUNTER", "SCU", {
+        "simpleCounter": {"id": counter_id, "changes": {"countOnDay": counter["countOnDay"]}},
+    }, counter_id)
+
+    _save(parsed)
+    push()
+    return counter["title"], value
+
+
+def set_counter(title_or_id, value):
+    title, val = _set_counter_value(title_or_id, int(value))
+    print(f"Set counter '{title}' to {val} for today")
+
+
+def increment_counter(title_or_id, amount=1):
+    parsed = pull()
+    state = parsed["state"]
+    today = str(date.today())
+
+    counter_id, counter = _find_counter(state, title_or_id)
+    current = counter.get("countOnDay", {}).get(today, 0)
+    new_val = current + int(amount)
+    counter.setdefault("countOnDay", {})[today] = new_val
+
+    _make_op(parsed, "UPD", "SIMPLE_COUNTER", "SCU", {
+        "simpleCounter": {"id": counter_id, "changes": {"countOnDay": counter["countOnDay"]}},
+    }, counter_id)
+
+    _save(parsed)
+    push()
+    print(f"Counter '{counter['title']}': {current} → {new_val}")
+
+
+def decrement_counter(title_or_id, amount=1):
+    parsed = pull()
+    state = parsed["state"]
+    today = str(date.today())
+
+    counter_id, counter = _find_counter(state, title_or_id)
+    current = counter.get("countOnDay", {}).get(today, 0)
+    new_val = current - int(amount)
+    counter.setdefault("countOnDay", {})[today] = new_val
+
+    _make_op(parsed, "UPD", "SIMPLE_COUNTER", "SCU", {
+        "simpleCounter": {"id": counter_id, "changes": {"countOnDay": counter["countOnDay"]}},
+    }, counter_id)
+
+    _save(parsed)
+    push()
+    print(f"Counter '{counter['title']}': {current} → {new_val}")
+
+
+# ---------------------------------------------------------------------------
 # Phase 2 — Task Enhancements
 # ---------------------------------------------------------------------------
 
@@ -1719,6 +1867,16 @@ if __name__ == "__main__":
         pin_note(args[1])
     elif cmd == "unpin-note" and len(args) > 1:
         unpin_note(args[1])
+    elif cmd == "add-counter" and len(args) > 1:
+        add_counter(args[1], args[2] if len(args) > 2 else "clicks")
+    elif cmd == "delete-counter" and len(args) > 1:
+        delete_counter(args[1])
+    elif cmd == "increment-counter" and len(args) > 1:
+        increment_counter(args[1], args[2] if len(args) > 2 else 1)
+    elif cmd == "decrement-counter" and len(args) > 1:
+        decrement_counter(args[1], args[2] if len(args) > 2 else 1)
+    elif cmd == "set-counter" and len(args) > 2:
+        set_counter(args[1], args[2])
     elif cmd == "pull-push" and len(args) > 1:
         parsed = pull()
         state = parsed["state"]
