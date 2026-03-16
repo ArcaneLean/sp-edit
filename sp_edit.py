@@ -472,11 +472,14 @@ def dump_repeats(json_out=False):
                          "startTime": r.get("startTime"), "isPaused": r.get("isPaused", False),
                          "defaultEstimate": r.get("defaultEstimate", 0)})
         else:
+            every = r.get("repeatEvery", 1)
+            cycle = r.get("repeatCycle", "?")
+            cycle_str = f"every {every}d" if (cycle == "DAILY" and every > 1) else cycle
             time_str = f" @{r['startTime']}" if r.get("startTime") else ""
             est = r.get("defaultEstimate", 0)
             est_str = f" est={est // 60000}m" if est else ""
             paused = " [PAUSED]" if r.get("isPaused") else ""
-            print(f"{r['title']:<45} {r.get('repeatCycle','?'):<8} {','.join(days):<25} project={proj}{time_str}{est_str}{paused}  id={rid}")
+            print(f"{r['title']:<45} {cycle_str:<10} {','.join(days):<25} project={proj}{time_str}{est_str}{paused}  id={rid}")
     _print_or_json(rows, json_out)
 
 
