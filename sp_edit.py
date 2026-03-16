@@ -77,6 +77,48 @@ Usage:
 
 All dump-* commands accept --json for machine-readable output.
 
+    python3 sp_edit.py add-subtask "Title" "ParentTitle or ID"
+        Add a subtask under a parent task.
+
+    python3 sp_edit.py complete-subtask "Title or ID"
+        Mark a subtask as done.
+
+    python3 sp_edit.py delete-subtask "Title or ID"
+        Delete a subtask and remove it from its parent.
+
+    python3 sp_edit.py move-subtask "Title or ID" "NewParentTitle or ID"
+        Move a subtask to a different parent task.
+
+    python3 sp_edit.py tag-task "Title or ID" "TagTitle or ID"
+        Add a tag to a task.
+
+    python3 sp_edit.py untag-task "Title or ID" "TagTitle or ID"
+        Remove a tag from a task.
+
+    python3 sp_edit.py set-task-notes "Title or ID" "Markdown text"
+        Set the description/notes field on a task.
+
+    python3 sp_edit.py clear-task-notes "Title or ID"
+        Clear the description/notes field on a task.
+
+    python3 sp_edit.py move-to-backlog "Title or ID"
+        Move a task to its project's backlog.
+
+    python3 sp_edit.py move-from-backlog "Title or ID"
+        Move a task from backlog back to active tasks.
+
+    python3 sp_edit.py unschedule-task "Title or ID"
+        Remove due date, TODAY tag, and planner entry from a task.
+
+    python3 sp_edit.py reschedule-task "Title or ID" YYYY-MM-DD
+        Reschedule a task to a new date (handles all side-effects).
+
+    python3 sp_edit.py move-task-up "Title or ID"
+    python3 sp_edit.py move-task-down "Title or ID"
+    python3 sp_edit.py move-task-to-top "Title or ID"
+    python3 sp_edit.py move-task-to-bottom "Title or ID"
+        Reorder a task within its project.
+
     python3 sp_edit.py add-project "Title"
         Create a new project.
 
@@ -857,6 +899,381 @@ def update_project(title_or_id, changes):
 
 
 # ---------------------------------------------------------------------------
+# Phase 2 — Task Enhancements
+# ---------------------------------------------------------------------------
+
+def _find_tag_entity(state, title_or_id):
+    tags = state["tag"]["entities"]
+    if title_or_id in tags:
+        return title_or_id, tags[title_or_id]
+    needle = title_or_id.lower()
+    matches = [(tid, t) for tid, t in tags.items() if t["title"].lower() == needle]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        print(f"Error: multiple tags match '{title_or_id}':")
+        for tid, t in matches:
+            print(f"  {tid}  {t['title']}")
+        sys.exit(1)
+    print(f"Error: tag '{title_or_id}' not found.")
+    print("Available:", [t["title"] for t in tags.values()])
+    sys.exit(1)
+
+
+def _unschedule(state, task_id, task):
+    """Remove all scheduling from a task in-place (no op emitted — caller must do that)."""
+    old_due = task.pop("dueDay", None)
+    if "TODAY" in task.get("tagIds", []):
+        task["tagIds"].remove("TODAY")
+    today_tag = state["tag"]["entities"].get("TODAY")
+    if today_tag and task_id in today_tag.get("taskIds", []):
+        today_tag["taskIds"].remove(task_id)
+    for day_tasks in state["planner"]["days"].values():
+        if task_id in day_tasks:
+            day_tasks.remove(task_id)
+    return old_due
+
+
+# 2a — Subtasks
+
+def add_subtask(title, parent_title_or_id):
+    parsed = pull()
+    state = parsed["state"]
+    now_ms = int(time.time() * 1000)
+
+    parent_id, parent = _find_task(state, parent_title_or_id)
+    task_id = _new_task_id()
+
+    task = {
+        "id": task_id,
+        "parentId": parent_id,
+        "subTaskIds": [],
+        "timeSpentOnDay": {},
+        "timeSpent": 0,
+        "timeEstimate": 0,
+        "isDone": False,
+        "title": title,
+        "tagIds": [],
+        "created": now_ms,
+        "attachments": [],
+        "projectId": parent.get("projectId"),
+    }
+
+    _make_op(parsed, "CRT", "TASK", "HA", {
+        "task": task,
+        "workContextId": parent_id,
+        "workContextType": "TASK",
+        "isAddToBacklog": False,
+        "isAddToBottom": True,
+    }, task_id)
+
+    state["task"]["entities"][task_id] = task
+    state["task"]["ids"].append(task_id)
+    parent.setdefault("subTaskIds", []).append(task_id)
+
+    _save(parsed)
+    push()
+    print(f"Added subtask '{title}' under '{parent['title']}'")
+
+
+def complete_subtask(title_or_id):
+    complete_task(title_or_id)
+
+
+def delete_subtask(title_or_id):
+    parsed = pull()
+    state = parsed["state"]
+
+    task_id, task = _find_task(state, title_or_id)
+    parent_id = task.get("parentId")
+
+    _make_op(parsed, "DEL", "TASK", "HDM", {"taskIds": [task_id]}, task_id)
+
+    del state["task"]["entities"][task_id]
+    if task_id in state["task"]["ids"]:
+        state["task"]["ids"].remove(task_id)
+    if parent_id and parent_id in state["task"]["entities"]:
+        parent = state["task"]["entities"][parent_id]
+        if task_id in parent.get("subTaskIds", []):
+            parent["subTaskIds"].remove(task_id)
+
+    _save(parsed)
+    push()
+    print(f"Deleted subtask '{task['title']}'")
+
+
+def move_subtask(title_or_id, new_parent_title_or_id):
+    parsed = pull()
+    state = parsed["state"]
+
+    task_id, task = _find_task(state, title_or_id)
+    new_parent_id, new_parent = _find_task(state, new_parent_title_or_id)
+
+    old_parent_id = task.get("parentId")
+    if old_parent_id and old_parent_id in state["task"]["entities"]:
+        old_parent = state["task"]["entities"][old_parent_id]
+        if task_id in old_parent.get("subTaskIds", []):
+            old_parent["subTaskIds"].remove(task_id)
+
+    task["parentId"] = new_parent_id
+    task["projectId"] = new_parent.get("projectId")
+    new_parent.setdefault("subTaskIds", []).append(task_id)
+
+    _make_op(parsed, "UPD", "TASK", "HU", {
+        "task": {"id": task_id, "changes": {"parentId": new_parent_id, "projectId": task["projectId"]}},
+    }, task_id)
+
+    _save(parsed)
+    push()
+    print(f"Moved subtask '{task['title']}' to '{new_parent['title']}'")
+
+
+# 2b — Task Tagging
+
+def tag_task(title_or_id, tag_title_or_id):
+    parsed = pull()
+    state = parsed["state"]
+
+    task_id, task = _find_task(state, title_or_id)
+    tag_id, tag = _find_tag_entity(state, tag_title_or_id)
+
+    if tag_id in task.get("tagIds", []):
+        print(f"Task '{task['title']}' already has tag '{tag['title']}'")
+        return
+
+    task.setdefault("tagIds", []).append(tag_id)
+    tag.setdefault("taskIds", []).append(task_id)
+
+    # Handle TODAY scheduling side-effects
+    if tag_id == "TODAY":
+        today = str(date.today())
+        task["dueDay"] = task.get("dueDay") or today
+        state["planner"]["days"].setdefault(task["dueDay"], [])
+        if task_id not in state["planner"]["days"][task["dueDay"]]:
+            state["planner"]["days"][task["dueDay"]].append(task_id)
+
+    _make_op(parsed, "UPD", "TASK", "HU", {
+        "task": {"id": task_id, "changes": {"tagIds": task["tagIds"]}},
+    }, task_id)
+
+    _save(parsed)
+    push()
+    print(f"Tagged '{task['title']}' with '{tag['title']}'")
+
+
+def untag_task(title_or_id, tag_title_or_id):
+    parsed = pull()
+    state = parsed["state"]
+
+    task_id, task = _find_task(state, title_or_id)
+    tag_id, tag = _find_tag_entity(state, tag_title_or_id)
+
+    if tag_id not in task.get("tagIds", []):
+        print(f"Task '{task['title']}' does not have tag '{tag['title']}'")
+        return
+
+    task["tagIds"].remove(tag_id)
+    if task_id in tag.get("taskIds", []):
+        tag["taskIds"].remove(task_id)
+
+    changes = {"tagIds": task["tagIds"]}
+
+    # If removing TODAY, also clean up dueDay and planner
+    if tag_id == "TODAY":
+        _unschedule(state, task_id, task)
+        changes = {"tagIds": task["tagIds"], "dueDay": None}
+
+    _make_op(parsed, "UPD", "TASK", "HU", {
+        "task": {"id": task_id, "changes": changes},
+    }, task_id)
+
+    _save(parsed)
+    push()
+    print(f"Removed tag '{tag['title']}' from '{task['title']}'")
+
+
+# 2c — Task Description
+
+def set_task_notes(title_or_id, notes_text):
+    parsed = pull()
+    state = parsed["state"]
+
+    task_id, task = _find_task(state, title_or_id)
+    task["notes"] = notes_text
+
+    _make_op(parsed, "UPD", "TASK", "HU", {
+        "task": {"id": task_id, "changes": {"notes": notes_text}},
+    }, task_id)
+
+    _save(parsed)
+    push()
+    print(f"Set notes on '{task['title']}'")
+
+
+def clear_task_notes(title_or_id):
+    set_task_notes(title_or_id, "")
+
+
+# 2d — Backlog Management
+
+def move_to_backlog(title_or_id):
+    parsed = pull()
+    state = parsed["state"]
+
+    task_id, task = _find_task(state, title_or_id)
+    proj_id = task.get("projectId")
+    if not proj_id or proj_id not in state["project"]["entities"]:
+        print(f"Error: task '{task['title']}' has no project and cannot be moved to backlog.")
+        sys.exit(1)
+
+    project = state["project"]["entities"][proj_id]
+    if task_id in project.get("taskIds", []):
+        project["taskIds"].remove(task_id)
+    if task_id not in project.get("backlogTaskIds", []):
+        project.setdefault("backlogTaskIds", []).append(task_id)
+
+    _make_op(parsed, "UPD", "TASK", "HU", {
+        "task": {"id": task_id, "changes": {}},
+    }, task_id)
+
+    _save(parsed)
+    push()
+    print(f"Moved '{task['title']}' to backlog of '{project['title']}'")
+
+
+def move_from_backlog(title_or_id):
+    parsed = pull()
+    state = parsed["state"]
+
+    task_id, task = _find_task(state, title_or_id)
+    proj_id = task.get("projectId")
+    if not proj_id or proj_id not in state["project"]["entities"]:
+        print(f"Error: task '{task['title']}' has no project.")
+        sys.exit(1)
+
+    project = state["project"]["entities"][proj_id]
+    if task_id in project.get("backlogTaskIds", []):
+        project["backlogTaskIds"].remove(task_id)
+    if task_id not in project.get("taskIds", []):
+        project.setdefault("taskIds", []).append(task_id)
+
+    _make_op(parsed, "UPD", "TASK", "HU", {
+        "task": {"id": task_id, "changes": {}},
+    }, task_id)
+
+    _save(parsed)
+    push()
+    print(f"Moved '{task['title']}' from backlog to active tasks in '{project['title']}'")
+
+
+# 2e — Scheduling
+
+def unschedule_task(title_or_id):
+    parsed = pull()
+    state = parsed["state"]
+
+    task_id, task = _find_task(state, title_or_id)
+    _unschedule(state, task_id, task)
+
+    _make_op(parsed, "UPD", "TASK", "HU", {
+        "task": {"id": task_id, "changes": {"dueDay": None, "tagIds": task.get("tagIds", [])}},
+    }, task_id)
+
+    _save(parsed)
+    push()
+    print(f"Unscheduled '{task['title']}'")
+
+
+def reschedule_task(title_or_id, new_date):
+    parsed = pull()
+    state = parsed["state"]
+
+    task_id, task = _find_task(state, title_or_id)
+
+    # Remove old scheduling
+    _unschedule(state, task_id, task)
+
+    # Apply new date
+    task["dueDay"] = new_date
+    today = str(date.today())
+    if new_date == today:
+        if "TODAY" not in task.get("tagIds", []):
+            task.setdefault("tagIds", []).append("TODAY")
+        today_tag = state["tag"]["entities"].get("TODAY")
+        if today_tag and task_id not in today_tag.get("taskIds", []):
+            today_tag.setdefault("taskIds", []).append(task_id)
+
+    state["planner"]["days"].setdefault(new_date, [])
+    if task_id not in state["planner"]["days"][new_date]:
+        state["planner"]["days"][new_date].append(task_id)
+
+    _make_op(parsed, "UPD", "TASK", "HU", {
+        "task": {"id": task_id, "changes": {"dueDay": new_date, "tagIds": task.get("tagIds", [])}},
+    }, task_id)
+
+    _save(parsed)
+    push()
+    print(f"Rescheduled '{task['title']}' to {new_date}")
+
+
+# 2f — Task Ordering
+
+def _reorder_task(title_or_id, delta=None, to_index=None):
+    """Move a task within its project's taskIds list."""
+    parsed = pull()
+    state = parsed["state"]
+
+    task_id, task = _find_task(state, title_or_id)
+    proj_id = task.get("projectId")
+    if not proj_id or proj_id not in state["project"]["entities"]:
+        print(f"Error: task '{task['title']}' has no project.")
+        sys.exit(1)
+
+    task_ids = state["project"]["entities"][proj_id]["taskIds"]
+    if task_id not in task_ids:
+        print(f"Error: task '{task['title']}' is not in the active task list (may be in backlog).")
+        sys.exit(1)
+
+    idx = task_ids.index(task_id)
+    task_ids.remove(task_id)
+
+    if to_index is not None:
+        new_idx = to_index if to_index >= 0 else len(task_ids)
+    else:
+        new_idx = max(0, min(len(task_ids), idx + delta))
+
+    task_ids.insert(new_idx, task_id)
+
+    _make_op(parsed, "UPD", "TASK", "HU", {
+        "task": {"id": task_id, "changes": {}},
+    }, task_id)
+
+    _save(parsed)
+    push()
+    return task["title"]
+
+
+def move_task_up(title_or_id):
+    title = _reorder_task(title_or_id, delta=-1)
+    print(f"Moved '{title}' up")
+
+
+def move_task_down(title_or_id):
+    title = _reorder_task(title_or_id, delta=1)
+    print(f"Moved '{title}' down")
+
+
+def move_task_to_top(title_or_id):
+    title = _reorder_task(title_or_id, to_index=0)
+    print(f"Moved '{title}' to top")
+
+
+def move_task_to_bottom(title_or_id):
+    title = _reorder_task(title_or_id, to_index=-1)
+    print(f"Moved '{title}' to bottom")
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -891,6 +1308,38 @@ if __name__ == "__main__":
         dump_counters(json_out)
     elif cmd == "dump-archive":
         dump_archive(json_out)
+    elif cmd == "add-subtask" and len(args) > 2:
+        add_subtask(args[1], args[2])
+    elif cmd == "complete-subtask" and len(args) > 1:
+        complete_subtask(args[1])
+    elif cmd == "delete-subtask" and len(args) > 1:
+        delete_subtask(args[1])
+    elif cmd == "move-subtask" and len(args) > 2:
+        move_subtask(args[1], args[2])
+    elif cmd == "tag-task" and len(args) > 2:
+        tag_task(args[1], args[2])
+    elif cmd == "untag-task" and len(args) > 2:
+        untag_task(args[1], args[2])
+    elif cmd == "set-task-notes" and len(args) > 2:
+        set_task_notes(args[1], args[2])
+    elif cmd == "clear-task-notes" and len(args) > 1:
+        clear_task_notes(args[1])
+    elif cmd == "move-to-backlog" and len(args) > 1:
+        move_to_backlog(args[1])
+    elif cmd == "move-from-backlog" and len(args) > 1:
+        move_from_backlog(args[1])
+    elif cmd == "unschedule-task" and len(args) > 1:
+        unschedule_task(args[1])
+    elif cmd == "reschedule-task" and len(args) > 2:
+        reschedule_task(args[1], args[2])
+    elif cmd == "move-task-up" and len(args) > 1:
+        move_task_up(args[1])
+    elif cmd == "move-task-down" and len(args) > 1:
+        move_task_down(args[1])
+    elif cmd == "move-task-to-top" and len(args) > 1:
+        move_task_to_top(args[1])
+    elif cmd == "move-task-to-bottom" and len(args) > 1:
+        move_task_to_bottom(args[1])
     elif cmd == "add-task" and len(args) > 1:
         title    = args[1]
         project  = args[2] if len(args) > 2 else "Inbox"
