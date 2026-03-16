@@ -51,6 +51,21 @@ Usage:
     python3 sp_edit.py dump-today
         List tasks scheduled for today (dueDay=today or TODAY tag), sorted by project.
 
+    python3 sp_edit.py dump-projects
+        List all projects with task and backlog counts.
+
+    python3 sp_edit.py dump-tags
+        List all tags with task counts.
+
+    python3 sp_edit.py dump-project "Title or ID"
+        List tasks in a specific project.
+
+    python3 sp_edit.py dump-tag "Title"
+        List tasks carrying a specific tag.
+
+    python3 sp_edit.py dump-backlog "Title or ID"
+        List backlog tasks for a specific project.
+
     python3 sp_edit.py add-project "Title"
         Create a new project.
 
@@ -320,6 +335,101 @@ def dump_today():
         print(f"[{done}] {t['title']:<50} project={proj:<20} est={est_str:<5} spent={spent_str}")
 
     print(f"\n{'':>4} {len(today_tasks)} tasks — est total: {total_est // 60000}m  spent total: {total_spent // 60000}m")
+
+
+def dump_projects():
+    pull()
+    with open(LOCAL_STATE) as f:
+        parsed = json.load(f)
+    state = parsed["state"]
+    projects = state["project"]["entities"]
+    for p in projects.values():
+        archived = " [archived]" if p.get("isArchived") else ""
+        task_count = len(p.get("taskIds", []))
+        backlog_count = len(p.get("backlogTaskIds", []))
+        print(f"{p['title']:<40} tasks={task_count:<4} backlog={backlog_count}{archived}  id={p['id']}")
+
+
+def dump_tags():
+    pull()
+    with open(LOCAL_STATE) as f:
+        parsed = json.load(f)
+    state = parsed["state"]
+    tags = state["tag"]["entities"]
+    for t in tags.values():
+        task_count = len(t.get("taskIds", []))
+        print(f"{t['title']:<30} tasks={task_count:<4}  id={t['id']}")
+
+
+def dump_project(project_name):
+    pull()
+    with open(LOCAL_STATE) as f:
+        parsed = json.load(f)
+    state = parsed["state"]
+    project_id, project = _find_project_by_title_or_id(state, project_name)
+    tasks = state["task"]["entities"]
+    tags = {t["id"]: t["title"] for t in state["tag"]["entities"].values()}
+
+    task_ids = project.get("taskIds", [])
+    if not task_ids:
+        print(f"No tasks in '{project['title']}'.")
+        return
+    for tid in task_ids:
+        t = tasks.get(tid)
+        if not t:
+            continue
+        done = "✓" if t.get("isDone") else " "
+        tag_names = [tags.get(x, x) for x in t.get("tagIds", []) if x != "TODAY"]
+        due = f"  due={t['dueDay']}" if t.get("dueDay") else ""
+        tags_str = f"  tags={tag_names}" if tag_names else ""
+        print(f"[{done}] {t['title']:<50}{due}{tags_str}  id={tid}")
+
+
+def dump_tag(tag_name):
+    pull()
+    with open(LOCAL_STATE) as f:
+        parsed = json.load(f)
+    state = parsed["state"]
+    tags = state["tag"]["entities"]
+
+    tag = next((t for t in tags.values() if t["title"].lower() == tag_name.lower()), None)
+    if tag is None:
+        print(f"Error: tag '{tag_name}' not found.")
+        print("Available:", [t["title"] for t in tags.values()])
+        sys.exit(1)
+
+    task_entities = state["task"]["entities"]
+    projects = {p["id"]: p["title"] for p in state["project"]["entities"].values()}
+    for tid in tag.get("taskIds", []):
+        t = task_entities.get(tid)
+        if not t:
+            continue
+        done = "✓" if t.get("isDone") else " "
+        proj = projects.get(t.get("projectId"), "")
+        due = f"  due={t['dueDay']}" if t.get("dueDay") else ""
+        print(f"[{done}] {t['title']:<50} project={proj}{due}  id={tid}")
+
+
+def dump_backlog(project_name):
+    pull()
+    with open(LOCAL_STATE) as f:
+        parsed = json.load(f)
+    state = parsed["state"]
+    project_id, project = _find_project_by_title_or_id(state, project_name)
+    tasks = state["task"]["entities"]
+
+    backlog_ids = project.get("backlogTaskIds", [])
+    if not backlog_ids:
+        print(f"No backlog tasks in '{project['title']}'.")
+        return
+    for tid in backlog_ids:
+        t = tasks.get(tid)
+        if not t:
+            continue
+        done = "✓" if t.get("isDone") else " "
+        est_ms = t.get("timeEstimate", 0) or 0
+        est_str = f"  est={est_ms // 60000}m" if est_ms else ""
+        print(f"[{done}] {t['title']:<50}{est_str}  id={tid}")
 
 
 def add_task(title, project_name="Inbox", due_date=str(date.today())):
@@ -622,6 +732,16 @@ if __name__ == "__main__":
         dump_repeats()
     elif cmd == "dump-today":
         dump_today()
+    elif cmd == "dump-projects":
+        dump_projects()
+    elif cmd == "dump-tags":
+        dump_tags()
+    elif cmd == "dump-project" and len(sys.argv) > 2:
+        dump_project(sys.argv[2])
+    elif cmd == "dump-tag" and len(sys.argv) > 2:
+        dump_tag(sys.argv[2])
+    elif cmd == "dump-backlog" and len(sys.argv) > 2:
+        dump_backlog(sys.argv[2])
     elif cmd == "add-task" and len(sys.argv) > 2:
         title    = sys.argv[2]
         project  = sys.argv[3] if len(sys.argv) > 3 else "Inbox"
