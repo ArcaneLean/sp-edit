@@ -1104,6 +1104,7 @@ def add_tag(title, color=None):
         "color": color,
         "created": now_ms,
         "taskIds": [],
+        "icon": None,
         "advancedCfg": {
             "worklogExportSettings": {
                 "cols": ["DATE", "START", "END", "TIME_CLOCK", "TITLES_INCLUDING_SUB"],
@@ -1114,9 +1115,22 @@ def add_tag(title, color=None):
                 "groupBy": "DATE",
             }
         },
+        "theme": {
+            "isAutoContrast": True,
+            "isDisableBackgroundTint": False,
+            "primary": color or "#000000",
+            "huePrimary": "500",
+            "accent": "#ff4081",
+            "hueAccent": "500",
+            "warn": "#e11826",
+            "hueWarn": "500",
+            "backgroundImageDark": None,
+            "backgroundImageLight": None,
+            "backgroundOverlayOpacity": 20,
+        },
     }
 
-    _make_op(parsed, "CRT", "TAG", "TGA", {"tag": tag}, tag_id)
+    _make_op(parsed, "CRT", "TAG", "GA", {"tag": tag}, tag_id)
 
     state["tag"]["entities"][tag_id] = tag
     state["tag"]["ids"].append(tag_id)
@@ -1132,7 +1146,7 @@ def update_tag(title_or_id, changes):
 
     tag_id, tag = _find_tag_entity(state, title_or_id)
 
-    _make_op(parsed, "UPD", "TAG", "TGU", {
+    _make_op(parsed, "UPD", "TAG", "GU", {
         "tag": {"id": tag_id, "changes": changes},
     }, tag_id)
 
@@ -1162,7 +1176,7 @@ def delete_tag(title_or_id):
     if tag_id in state["tag"]["ids"]:
         state["tag"]["ids"].remove(tag_id)
 
-    _make_op(parsed, "DEL", "TAG", "TGDM", {"tagIds": [tag_id]}, tag_id)
+    _make_op(parsed, "DEL", "TAG", "GD", {"id": tag_id}, tag_id)
 
     _save(parsed)
     push()
