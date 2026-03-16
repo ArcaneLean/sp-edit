@@ -35,6 +35,17 @@ rclone config  # follow prompts, name the remote "dropbox"
 python3 sp_edit.py dump                            # list all tasks
 python3 sp_edit.py dump-today                      # list today's tasks with est/spent time
 python3 sp_edit.py dump-repeats                    # list all recurring task configs
+python3 sp_edit.py dump-projects                   # list all projects
+python3 sp_edit.py dump-tags                       # list all tags
+python3 sp_edit.py dump-project "Project"          # tasks in a specific project
+python3 sp_edit.py dump-tag "Tag"                  # tasks with a specific tag
+python3 sp_edit.py dump-backlog "Project"          # backlog tasks for a project
+python3 sp_edit.py dump-notes                      # list all notes
+python3 sp_edit.py dump-counters                   # list simple counters with today's value
+python3 sp_edit.py dump-archive                    # list archived tasks
+
+# All dump-* commands accept --json for machine-readable output
+python3 sp_edit.py dump-today --json
 
 # Raw access
 python3 sp_edit.py pull                            # download -> /tmp/sp_state.json

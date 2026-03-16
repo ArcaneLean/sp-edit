@@ -66,6 +66,17 @@ Usage:
     python3 sp_edit.py dump-backlog "Title or ID"
         List backlog tasks for a specific project.
 
+    python3 sp_edit.py dump-notes
+        List all notes (title, project, pinned status).
+
+    python3 sp_edit.py dump-counters
+        List all simple counters with today's value.
+
+    python3 sp_edit.py dump-archive
+        List archived tasks (archiveYoung + archiveOld).
+
+All dump-* commands accept --json for machine-readable output.
+
     python3 sp_edit.py add-project "Title"
         Create a new project.
 
@@ -272,40 +283,59 @@ def _new_task_id():
 # Commands
 # ---------------------------------------------------------------------------
 
-def dump():
+def _load_state():
     pull()
     with open(LOCAL_STATE) as f:
-        parsed = json.load(f)
+        return json.load(f)
+
+
+def _print_or_json(rows, json_out):
+    if json_out:
+        print(json.dumps(rows, indent=2, ensure_ascii=False))
+
+
+def dump(json_out=False):
+    parsed = _load_state()
     tasks = parsed["state"]["task"]["entities"]
     projects = {p["id"]: p["title"] for p in parsed["state"]["project"]["entities"].values()}
     tags = {t["id"]: t["title"] for t in parsed["state"]["tag"]["entities"].values()}
+    rows = []
     for tid, t in tasks.items():
         proj = projects.get(t.get("projectId"), "")
         tag_names = [tags.get(x, x) for x in t.get("tagIds", [])]
-        done = "✓" if t.get("isDone") else " "
-        print(f"[{done}] {t['title']:<50} project={proj}  tags={tag_names}  id={tid}")
+        if json_out:
+            rows.append({"id": tid, "title": t["title"], "project": proj,
+                         "tags": tag_names, "done": t.get("isDone", False)})
+        else:
+            done = "✓" if t.get("isDone") else " "
+            print(f"[{done}] {t['title']:<50} project={proj}  tags={tag_names}  id={tid}")
+    _print_or_json(rows, json_out)
 
 
-def dump_repeats():
-    pull()
-    with open(LOCAL_STATE) as f:
-        parsed = json.load(f)
+def dump_repeats(json_out=False):
+    parsed = _load_state()
     cfgs = parsed["state"]["taskRepeatCfg"]["entities"]
     projects = {p["id"]: p["title"] for p in parsed["state"]["project"]["entities"].values()}
+    rows = []
     for rid, r in cfgs.items():
         proj = projects.get(r.get("projectId"), "")
         days = [d[:3] for d in DAY_FIELDS if r.get(d)]
-        time_str = f" @{r['startTime']}" if r.get("startTime") else ""
-        est = r.get("defaultEstimate", 0)
-        est_str = f" est={est // 60000}m" if est else ""
-        paused = " [PAUSED]" if r.get("isPaused") else ""
-        print(f"{r['title']:<45} {r.get('repeatCycle','?'):<8} {','.join(days):<25} project={proj}{time_str}{est_str}{paused}  id={rid}")
+        if json_out:
+            rows.append({"id": rid, "title": r["title"], "project": proj,
+                         "cycle": r.get("repeatCycle"), "days": days,
+                         "startTime": r.get("startTime"), "isPaused": r.get("isPaused", False),
+                         "defaultEstimate": r.get("defaultEstimate", 0)})
+        else:
+            time_str = f" @{r['startTime']}" if r.get("startTime") else ""
+            est = r.get("defaultEstimate", 0)
+            est_str = f" est={est // 60000}m" if est else ""
+            paused = " [PAUSED]" if r.get("isPaused") else ""
+            print(f"{r['title']:<45} {r.get('repeatCycle','?'):<8} {','.join(days):<25} project={proj}{time_str}{est_str}{paused}  id={rid}")
+    _print_or_json(rows, json_out)
 
 
-def dump_today():
-    pull()
-    with open(LOCAL_STATE) as f:
-        parsed = json.load(f)
+def dump_today(json_out=False):
+    parsed = _load_state()
     state = parsed["state"]
     tasks = state["task"]["entities"]
     projects = {p["id"]: p["title"] for p in state["project"]["entities"].values()}
@@ -318,53 +348,68 @@ def dump_today():
     today_tasks.sort(key=lambda t: (projects.get(t.get("projectId"), ""), t["title"]))
 
     if not today_tasks:
-        print("No tasks scheduled for today.")
+        if not json_out:
+            print("No tasks scheduled for today.")
+        else:
+            print("[]")
         return
 
+    rows = []
     total_est = 0
     total_spent = 0
     for t in today_tasks:
         proj = projects.get(t.get("projectId"), "")
-        done = "✓" if t.get("isDone") else " "
         est_ms = t.get("timeEstimate", 0) or 0
         spent_ms = t.get("timeSpent", 0) or 0
-        est_str = f"{est_ms // 60000}m" if est_ms else "   -"
-        spent_str = f"{spent_ms // 60000}m" if spent_ms else "  -"
         total_est += est_ms
         total_spent += spent_ms
-        print(f"[{done}] {t['title']:<50} project={proj:<20} est={est_str:<5} spent={spent_str}")
+        if json_out:
+            rows.append({"id": t["id"], "title": t["title"], "project": proj,
+                         "done": t.get("isDone", False), "dueDay": t.get("dueDay"),
+                         "timeEstimate": est_ms, "timeSpent": spent_ms})
+        else:
+            done = "✓" if t.get("isDone") else " "
+            est_str = f"{est_ms // 60000}m" if est_ms else "   -"
+            spent_str = f"{spent_ms // 60000}m" if spent_ms else "  -"
+            print(f"[{done}] {t['title']:<50} project={proj:<20} est={est_str:<5} spent={spent_str}")
 
-    print(f"\n{'':>4} {len(today_tasks)} tasks — est total: {total_est // 60000}m  spent total: {total_spent // 60000}m")
+    if json_out:
+        _print_or_json(rows, json_out)
+    else:
+        print(f"\n{'':>4} {len(today_tasks)} tasks — est total: {total_est // 60000}m  spent total: {total_spent // 60000}m")
 
 
-def dump_projects():
-    pull()
-    with open(LOCAL_STATE) as f:
-        parsed = json.load(f)
-    state = parsed["state"]
-    projects = state["project"]["entities"]
+def dump_projects(json_out=False):
+    parsed = _load_state()
+    projects = parsed["state"]["project"]["entities"]
+    rows = []
     for p in projects.values():
-        archived = " [archived]" if p.get("isArchived") else ""
         task_count = len(p.get("taskIds", []))
         backlog_count = len(p.get("backlogTaskIds", []))
-        print(f"{p['title']:<40} tasks={task_count:<4} backlog={backlog_count}{archived}  id={p['id']}")
+        if json_out:
+            rows.append({"id": p["id"], "title": p["title"], "tasks": task_count,
+                         "backlog": backlog_count, "isArchived": p.get("isArchived", False)})
+        else:
+            archived = " [archived]" if p.get("isArchived") else ""
+            print(f"{p['title']:<40} tasks={task_count:<4} backlog={backlog_count}{archived}  id={p['id']}")
+    _print_or_json(rows, json_out)
 
 
-def dump_tags():
-    pull()
-    with open(LOCAL_STATE) as f:
-        parsed = json.load(f)
-    state = parsed["state"]
-    tags = state["tag"]["entities"]
+def dump_tags(json_out=False):
+    parsed = _load_state()
+    tags = parsed["state"]["tag"]["entities"]
+    rows = []
     for t in tags.values():
         task_count = len(t.get("taskIds", []))
-        print(f"{t['title']:<30} tasks={task_count:<4}  id={t['id']}")
+        if json_out:
+            rows.append({"id": t["id"], "title": t["title"], "tasks": task_count})
+        else:
+            print(f"{t['title']:<30} tasks={task_count:<4}  id={t['id']}")
+    _print_or_json(rows, json_out)
 
 
-def dump_project(project_name):
-    pull()
-    with open(LOCAL_STATE) as f:
-        parsed = json.load(f)
+def dump_project(project_name, json_out=False):
+    parsed = _load_state()
     state = parsed["state"]
     project_id, project = _find_project_by_title_or_id(state, project_name)
     tasks = state["task"]["entities"]
@@ -372,23 +417,30 @@ def dump_project(project_name):
 
     task_ids = project.get("taskIds", [])
     if not task_ids:
-        print(f"No tasks in '{project['title']}'.")
+        if not json_out:
+            print(f"No tasks in '{project['title']}'.")
+        else:
+            print("[]")
         return
+    rows = []
     for tid in task_ids:
         t = tasks.get(tid)
         if not t:
             continue
-        done = "✓" if t.get("isDone") else " "
         tag_names = [tags.get(x, x) for x in t.get("tagIds", []) if x != "TODAY"]
-        due = f"  due={t['dueDay']}" if t.get("dueDay") else ""
-        tags_str = f"  tags={tag_names}" if tag_names else ""
-        print(f"[{done}] {t['title']:<50}{due}{tags_str}  id={tid}")
+        if json_out:
+            rows.append({"id": tid, "title": t["title"], "done": t.get("isDone", False),
+                         "dueDay": t.get("dueDay"), "tags": tag_names})
+        else:
+            done = "✓" if t.get("isDone") else " "
+            due = f"  due={t['dueDay']}" if t.get("dueDay") else ""
+            tags_str = f"  tags={tag_names}" if tag_names else ""
+            print(f"[{done}] {t['title']:<50}{due}{tags_str}  id={tid}")
+    _print_or_json(rows, json_out)
 
 
-def dump_tag(tag_name):
-    pull()
-    with open(LOCAL_STATE) as f:
-        parsed = json.load(f)
+def dump_tag(tag_name, json_out=False):
+    parsed = _load_state()
     state = parsed["state"]
     tags = state["tag"]["entities"]
 
@@ -400,36 +452,125 @@ def dump_tag(tag_name):
 
     task_entities = state["task"]["entities"]
     projects = {p["id"]: p["title"] for p in state["project"]["entities"].values()}
+    rows = []
     for tid in tag.get("taskIds", []):
         t = task_entities.get(tid)
         if not t:
             continue
-        done = "✓" if t.get("isDone") else " "
         proj = projects.get(t.get("projectId"), "")
-        due = f"  due={t['dueDay']}" if t.get("dueDay") else ""
-        print(f"[{done}] {t['title']:<50} project={proj}{due}  id={tid}")
+        if json_out:
+            rows.append({"id": tid, "title": t["title"], "project": proj,
+                         "done": t.get("isDone", False), "dueDay": t.get("dueDay")})
+        else:
+            done = "✓" if t.get("isDone") else " "
+            due = f"  due={t['dueDay']}" if t.get("dueDay") else ""
+            print(f"[{done}] {t['title']:<50} project={proj}{due}  id={tid}")
+    _print_or_json(rows, json_out)
 
 
-def dump_backlog(project_name):
-    pull()
-    with open(LOCAL_STATE) as f:
-        parsed = json.load(f)
+def dump_backlog(project_name, json_out=False):
+    parsed = _load_state()
     state = parsed["state"]
     project_id, project = _find_project_by_title_or_id(state, project_name)
     tasks = state["task"]["entities"]
 
     backlog_ids = project.get("backlogTaskIds", [])
     if not backlog_ids:
-        print(f"No backlog tasks in '{project['title']}'.")
+        if not json_out:
+            print(f"No backlog tasks in '{project['title']}'.")
+        else:
+            print("[]")
         return
+    rows = []
     for tid in backlog_ids:
         t = tasks.get(tid)
         if not t:
             continue
-        done = "✓" if t.get("isDone") else " "
         est_ms = t.get("timeEstimate", 0) or 0
-        est_str = f"  est={est_ms // 60000}m" if est_ms else ""
-        print(f"[{done}] {t['title']:<50}{est_str}  id={tid}")
+        if json_out:
+            rows.append({"id": tid, "title": t["title"], "done": t.get("isDone", False),
+                         "timeEstimate": est_ms})
+        else:
+            done = "✓" if t.get("isDone") else " "
+            est_str = f"  est={est_ms // 60000}m" if est_ms else ""
+            print(f"[{done}] {t['title']:<50}{est_str}  id={tid}")
+    _print_or_json(rows, json_out)
+
+
+def dump_notes(json_out=False):
+    parsed = _load_state()
+    state = parsed["state"]
+    notes = state.get("note", {}).get("entities", {})
+    today_order = state.get("note", {}).get("todayOrder", [])
+    projects = {p["id"]: p["title"] for p in state["project"]["entities"].values()}
+
+    if not notes:
+        if not json_out:
+            print("No notes found.")
+        else:
+            print("[]")
+        return
+    rows = []
+    for nid, n in notes.items():
+        proj = projects.get(n.get("projectId"), "")
+        pinned = n.get("isPinnedToToday", False)
+        if json_out:
+            rows.append({"id": nid, "title": n.get("title", ""), "project": proj,
+                         "pinned": pinned})
+        else:
+            pin_str = " [pinned]" if pinned else ""
+            print(f"{n.get('title', ''):<50} project={proj}{pin_str}  id={nid}")
+    _print_or_json(rows, json_out)
+
+
+def dump_counters(json_out=False):
+    parsed = _load_state()
+    state = parsed["state"]
+    counters = state.get("simpleCounter", {}).get("entities", {})
+    today = str(date.today())
+
+    if not counters:
+        if not json_out:
+            print("No counters found.")
+        else:
+            print("[]")
+        return
+    rows = []
+    sorted_counters = sorted(counters.values(), key=lambda c: c.get("order", 0))
+    for c in sorted_counters:
+        today_val = c.get("countOnDay", {}).get(today, 0)
+        if json_out:
+            rows.append({"id": c["id"], "title": c["title"], "type": c.get("type"),
+                         "todayValue": today_val, "countOnDay": c.get("countOnDay", {})})
+        else:
+            print(f"{c['title']:<40} type={c.get('type','?'):<8} today={today_val}  id={c['id']}")
+    _print_or_json(rows, json_out)
+
+
+def dump_archive(json_out=False):
+    parsed = _load_state()
+    state = parsed["state"]
+    projects = {p["id"]: p["title"] for p in state["project"]["entities"].values()}
+
+    rows = []
+    for archive_key in ("archiveYoung", "archiveOld"):
+        archive = state.get(archive_key, {})
+        tasks = archive.get("task", {}).get("entities", {})
+        for tid, t in tasks.items():
+            proj = projects.get(t.get("projectId"), "")
+            if json_out:
+                rows.append({"id": tid, "title": t["title"], "project": proj,
+                             "archive": archive_key, "dueDay": t.get("dueDay")})
+            else:
+                due = f"  due={t['dueDay']}" if t.get("dueDay") else ""
+                print(f"{t['title']:<50} project={proj}{due}  [{archive_key}]  id={tid}")
+
+    if not rows and json_out:
+        print("[]")
+    elif not rows:
+        print("No archived tasks found.")
+    elif json_out:
+        _print_or_json(rows, json_out)
 
 
 def add_task(title, project_name="Inbox", due_date=str(date.today())):
@@ -720,60 +861,68 @@ def update_project(title_or_id, changes):
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    cmd = sys.argv[1] if len(sys.argv) > 1 else "dump"
+    args = [a for a in sys.argv[1:] if a != "--json"]
+    json_out = "--json" in sys.argv
+    cmd = args[0] if args else "dump"
 
     if cmd == "pull":
         pull()
     elif cmd == "push":
         push()
     elif cmd == "dump":
-        dump()
+        dump(json_out)
     elif cmd == "dump-repeats":
-        dump_repeats()
+        dump_repeats(json_out)
     elif cmd == "dump-today":
-        dump_today()
+        dump_today(json_out)
     elif cmd == "dump-projects":
-        dump_projects()
+        dump_projects(json_out)
     elif cmd == "dump-tags":
-        dump_tags()
-    elif cmd == "dump-project" and len(sys.argv) > 2:
-        dump_project(sys.argv[2])
-    elif cmd == "dump-tag" and len(sys.argv) > 2:
-        dump_tag(sys.argv[2])
-    elif cmd == "dump-backlog" and len(sys.argv) > 2:
-        dump_backlog(sys.argv[2])
-    elif cmd == "add-task" and len(sys.argv) > 2:
-        title    = sys.argv[2]
-        project  = sys.argv[3] if len(sys.argv) > 3 else "Inbox"
-        raw_date = sys.argv[4] if len(sys.argv) > 4 else str(date.today())
+        dump_tags(json_out)
+    elif cmd == "dump-project" and len(args) > 1:
+        dump_project(args[1], json_out)
+    elif cmd == "dump-tag" and len(args) > 1:
+        dump_tag(args[1], json_out)
+    elif cmd == "dump-backlog" and len(args) > 1:
+        dump_backlog(args[1], json_out)
+    elif cmd == "dump-notes":
+        dump_notes(json_out)
+    elif cmd == "dump-counters":
+        dump_counters(json_out)
+    elif cmd == "dump-archive":
+        dump_archive(json_out)
+    elif cmd == "add-task" and len(args) > 1:
+        title    = args[1]
+        project  = args[2] if len(args) > 2 else "Inbox"
+        raw_date = args[3] if len(args) > 3 else str(date.today())
         due      = None if raw_date.lower() == "none" else raw_date
         add_task(title, project, due)
-    elif cmd == "complete-task" and len(sys.argv) > 2:
-        complete_task(sys.argv[2])
-    elif cmd == "delete-task" and len(sys.argv) > 2:
-        delete_task(sys.argv[2])
-    elif cmd == "update-task" and len(sys.argv) > 3:
-        update_task(sys.argv[2], _parse_kvs(sys.argv[3:]))
-    elif cmd == "add-repeat" and len(sys.argv) > 5:
-        title       = sys.argv[2]
-        project     = sys.argv[3]
-        cycle       = sys.argv[4]
-        days        = sys.argv[5]
-        start_time  = sys.argv[6] if len(sys.argv) > 6 else None
-        est_min     = int(sys.argv[7]) if len(sys.argv) > 7 else 0
+    elif cmd == "complete-task" and len(args) > 1:
+        complete_task(args[1])
+    elif cmd == "delete-task" and len(args) > 1:
+        delete_task(args[1])
+    elif cmd == "update-task" and len(args) > 2:
+        update_task(args[1], _parse_kvs(args[2:]))
+    elif cmd == "add-repeat" and len(args) > 4:
+        title       = args[1]
+        project     = args[2]
+        cycle       = args[3]
+        days        = args[4]
+        start_time  = args[5] if len(args) > 5 else None
+        est_min     = int(args[6]) if len(args) > 6 else 0
         add_repeat(title, project, cycle, days, start_time, est_min)
-    elif cmd == "update-repeat" and len(sys.argv) > 3:
-        update_repeat(sys.argv[2], _parse_kvs(sys.argv[3:]))
-    elif cmd == "delete-repeat" and len(sys.argv) > 2:
-        delete_repeat(sys.argv[2])
-    elif cmd == "add-project" and len(sys.argv) > 2:
-        add_project(sys.argv[2])
-    elif cmd == "update-project" and len(sys.argv) > 3:
-        update_project(sys.argv[2], _parse_kvs(sys.argv[3:]))
-    elif cmd == "pull-push" and len(sys.argv) > 2:
+    elif cmd == "update-repeat" and len(args) > 2:
+        update_repeat(args[1], _parse_kvs(args[2:]))
+    elif cmd == "delete-repeat" and len(args) > 1:
+        delete_repeat(args[1])
+    elif cmd == "add-project" and len(args) > 1:
+        add_project(args[1])
+    elif cmd == "update-project" and len(args) > 2:
+        update_project(args[1], _parse_kvs(args[2:]))
+    elif cmd == "pull-push" and len(args) > 1:
         parsed = pull()
         state = parsed["state"]
-        exec(sys.argv[2])
+        exec(args[1])
         with open(LOCAL_STATE, "w") as f:
             json.dump(parsed, f, indent=2)
         push()
