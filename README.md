@@ -33,6 +33,7 @@ rclone config  # follow prompts, name the remote "dropbox"
 ```bash
 # Inspect
 python3 sp_edit.py dump                            # list all tasks
+python3 sp_edit.py dump-today                      # list today's tasks with est/spent time
 python3 sp_edit.py dump-repeats                    # list all recurring task configs
 
 # Raw access
@@ -62,6 +63,10 @@ python3 sp_edit.py add-repeat "Finances" Household MONTHLY mon
 python3 sp_edit.py update-repeat "Standup" startTime='"10:00"'
 python3 sp_edit.py update-repeat "Standup" isPaused=true
 python3 sp_edit.py delete-repeat "Standup"
+
+# Projects
+python3 sp_edit.py add-project "Title"
+python3 sp_edit.py update-project "Title or ID" title='"New title"'
 ```
 
 ### `add-repeat` day syntax
@@ -104,6 +109,8 @@ When SP syncs, it replays `recentOps` from remote onto its local state rather th
 | `RA` | `CRT` | `TASK_REPEAT_CFG` | Create repeat config |
 | `RU` | `UPD` | `TASK_REPEAT_CFG` | Update repeat config |
 | `HRC` | `DEL` | `TASK_REPEAT_CFG` | Delete repeat config |
+| `PA` | `CRT` | `PROJECT` | Create project |
+| `PC` | `UPD` | `PROJECT` | Update project |
 
 ### Scheduling a task for a specific day
 
