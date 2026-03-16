@@ -703,7 +703,7 @@ def dump_archive(json_out=False):
 
     rows = []
     for archive_key in ("archiveYoung", "archiveOld"):
-        archive = state.get(archive_key, {})
+        archive = parsed.get(archive_key, {})
         tasks = archive.get("task", {}).get("entities", {})
         for tid, t in tasks.items():
             proj = projects.get(t.get("projectId"), "")
@@ -1535,7 +1535,7 @@ def move_done_to_archive():
         print("No done tasks to archive.")
         return
 
-    archive = state.setdefault("archiveYoung", {})
+    archive = parsed.setdefault("archiveYoung", {})
     arch_tasks = archive.setdefault("task", {})
     arch_entities = arch_tasks.setdefault("entities", {})
     arch_ids = arch_tasks.setdefault("ids", [])
@@ -1576,7 +1576,7 @@ def restore_task(title_or_id):
     found_id = None
     found_key = None
     for archive_key in ("archiveYoung", "archiveOld"):
-        arch_tasks = state.get(archive_key, {}).get("task", {}).get("entities", {})
+        arch_tasks = parsed.get(archive_key, {}).get("task", {}).get("entities", {})
         for tid, t in arch_tasks.items():
             if tid == title_or_id or t.get("title", "").lower() == title_or_id.lower():
                 found_task = t
@@ -1603,7 +1603,7 @@ def restore_task(title_or_id):
             proj.setdefault("taskIds", []).append(found_id)
 
     # Remove from archive
-    arch = state[found_key]["task"]
+    arch = parsed[found_key]["task"]
     del arch["entities"][found_id]
     if found_id in arch.get("ids", []):
         arch["ids"].remove(found_id)
