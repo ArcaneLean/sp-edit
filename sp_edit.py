@@ -703,23 +703,21 @@ def dump_archive(json_out=False):
 
     rows = []
     for archive_key in ("archiveYoung", "archiveOld"):
-        archive = state.get(archive_key, {})
+        archive = parsed.get(archive_key, state.get(archive_key, {}))
         tasks = archive.get("task", {}).get("entities", {})
         for tid, t in tasks.items():
             proj = projects.get(t.get("projectId"), "")
-            if json_out:
-                rows.append({"id": tid, "title": t["title"], "project": proj,
-                             "archive": archive_key, "dueDay": t.get("dueDay")})
-            else:
-                due = f"  due={t['dueDay']}" if t.get("dueDay") else ""
-                print(f"{t['title']:<50} project={proj}{due}  [{archive_key}]  id={tid}")
+            due = f"  due={t['dueDay']}" if t.get("dueDay") else ""
+            rows.append({"id": tid, "title": t["title"], "project": proj,
+                         "archive": archive_key, "dueDay": t.get("dueDay"), "_due": due})
 
-    if not rows and json_out:
-        print("[]")
-    elif not rows:
-        print("No archived tasks found.")
+    if not rows:
+        print("[]" if json_out else "No archived tasks found.")
     elif json_out:
-        _print_or_json(rows, json_out)
+        _print_or_json([{k: v for k, v in r.items() if not k.startswith("_")} for r in rows], json_out)
+    else:
+        for r in rows:
+            print(f"{r['title']:<50} project={r['project']}{r['_due']}  [{r['archive']}]  id={r['id']}")
 
 
 def add_task(title, project_name="Inbox", due_date=str(date.today())):
@@ -772,11 +770,13 @@ def complete_task(title_or_id):
 
     task_id, task = _find_task(state, title_or_id)
 
+    now = int(__import__("time").time() * 1000)
     _make_op(parsed, "UPD", "TASK", "HU", {
-        "task": {"id": task_id, "changes": {"isDone": True}},
+        "task": {"id": task_id, "changes": {"isDone": True, "doneOn": now}},
     }, task_id)
 
     task["isDone"] = True
+    task["doneOn"] = now
 
     _save(parsed)
     push()
@@ -1535,13 +1535,24 @@ def move_done_to_archive():
         print("No done tasks to archive.")
         return
 
-    archive = state.setdefault("archiveYoung", {})
+    archive = parsed.setdefault("archiveYoung", {})
     arch_tasks = archive.setdefault("task", {})
     arch_entities = arch_tasks.setdefault("entities", {})
     arch_ids = arch_tasks.setdefault("ids", [])
 
-    all_ids = [tid for tid, _ in targets]
-    _make_op(parsed, "DEL", "TASK", "HDM", {"taskIds": all_ids}, all_ids[0], all_ids)
+    now = int(__import__("time").time() * 1000)
+
+    # Build full task payloads for HX op (SP requires complete task objects)
+    task_payloads = []
+    for task_id, task in targets:
+        if not task.get("doneOn"):
+            task["doneOn"] = now
+        subtasks = [state["task"]["entities"][s] for s in task.get("subTaskIds", [])
+                    if s in state["task"]["entities"]]
+        task_payloads.append({**task, "subTasks": subtasks})
+
+    _make_op(parsed, "UPD", "TASK", "HX", {"tasks": task_payloads}, targets[0][0])
+    _make_op(parsed, "BATCH", "ALL", "AF", {"timestamp": now}, targets[0][0])
 
     for task_id, task in targets:
         arch_entities[task_id] = task
@@ -1576,7 +1587,8 @@ def restore_task(title_or_id):
     found_id = None
     found_key = None
     for archive_key in ("archiveYoung", "archiveOld"):
-        arch_tasks = state.get(archive_key, {}).get("task", {}).get("entities", {})
+        src = parsed.get(archive_key, state.get(archive_key, {}))
+        arch_tasks = src.get("task", {}).get("entities", {})
         for tid, t in arch_tasks.items():
             if tid == title_or_id or t.get("title", "").lower() == title_or_id.lower():
                 found_task = t
@@ -1602,8 +1614,9 @@ def restore_task(title_or_id):
         if found_id not in proj.get("taskIds", []):
             proj.setdefault("taskIds", []).append(found_id)
 
-    # Remove from archive
-    arch = state[found_key]["task"]
+    # Remove from archive (root takes precedence over state)
+    arch_root = parsed if found_key in parsed else state
+    arch = arch_root[found_key]["task"]
     del arch["entities"][found_id]
     if found_id in arch.get("ids", []):
         arch["ids"].remove(found_id)
