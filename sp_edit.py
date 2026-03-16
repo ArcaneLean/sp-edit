@@ -47,6 +47,16 @@ Usage:
 
     python3 sp_edit.py delete-repeat "Title or ID"
         Delete a recurring task config.
+
+    python3 sp_edit.py dump-today
+        List tasks scheduled for today (dueDay=today or TODAY tag), sorted by project.
+
+    python3 sp_edit.py add-project "Title"
+        Create a new project.
+
+    python3 sp_edit.py update-project "Title or ID" field=value [field=value ...]
+        Update project fields. Values are parsed as JSON (strings need quotes).
+        Example: update-project "Work" title='"ZZP"'
 """
 
 import base64, gzip, json, subprocess, sys, time, random, string, uuid
@@ -155,6 +165,24 @@ def _find_project(state, name):
     return pid
 
 
+def _find_project_by_title_or_id(state, title_or_id):
+    projects = state["project"]["entities"]
+    if title_or_id in projects:
+        return title_or_id, projects[title_or_id]
+    needle = title_or_id.lower()
+    matches = [(pid, p) for pid, p in projects.items() if p["title"].lower() == needle]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        print(f"Error: multiple projects match '{title_or_id}':")
+        for pid, p in matches:
+            print(f"  {pid}  {p['title']}")
+        sys.exit(1)
+    print(f"Error: no project found matching '{title_or_id}'")
+    print("Available:", [p["title"] for p in projects.values()])
+    sys.exit(1)
+
+
 def _find_task(state, title_or_id):
     """Find a task by exact ID, then exact title (case-insensitive), then partial title."""
     tasks = state["task"]["entities"]
@@ -230,8 +258,7 @@ def _new_task_id():
 # ---------------------------------------------------------------------------
 
 def dump():
-    if not Path(LOCAL_STATE).exists():
-        pull()
+    pull()
     with open(LOCAL_STATE) as f:
         parsed = json.load(f)
     tasks = parsed["state"]["task"]["entities"]
@@ -245,8 +272,7 @@ def dump():
 
 
 def dump_repeats():
-    if not Path(LOCAL_STATE).exists():
-        pull()
+    pull()
     with open(LOCAL_STATE) as f:
         parsed = json.load(f)
     cfgs = parsed["state"]["taskRepeatCfg"]["entities"]
@@ -259,6 +285,41 @@ def dump_repeats():
         est_str = f" est={est // 60000}m" if est else ""
         paused = " [PAUSED]" if r.get("isPaused") else ""
         print(f"{r['title']:<45} {r.get('repeatCycle','?'):<8} {','.join(days):<25} project={proj}{time_str}{est_str}{paused}  id={rid}")
+
+
+def dump_today():
+    pull()
+    with open(LOCAL_STATE) as f:
+        parsed = json.load(f)
+    state = parsed["state"]
+    tasks = state["task"]["entities"]
+    projects = {p["id"]: p["title"] for p in state["project"]["entities"].values()}
+    today = str(date.today())
+
+    today_tasks = [
+        t for t in tasks.values()
+        if t.get("dueDay") == today or "TODAY" in t.get("tagIds", [])
+    ]
+    today_tasks.sort(key=lambda t: (projects.get(t.get("projectId"), ""), t["title"]))
+
+    if not today_tasks:
+        print("No tasks scheduled for today.")
+        return
+
+    total_est = 0
+    total_spent = 0
+    for t in today_tasks:
+        proj = projects.get(t.get("projectId"), "")
+        done = "✓" if t.get("isDone") else " "
+        est_ms = t.get("timeEstimate", 0) or 0
+        spent_ms = t.get("timeSpent", 0) or 0
+        est_str = f"{est_ms // 60000}m" if est_ms else "   -"
+        spent_str = f"{spent_ms // 60000}m" if spent_ms else "  -"
+        total_est += est_ms
+        total_spent += spent_ms
+        print(f"[{done}] {t['title']:<50} project={proj:<20} est={est_str:<5} spent={spent_str}")
+
+    print(f"\n{'':>4} {len(today_tasks)} tasks — est total: {total_est // 60000}m  spent total: {total_spent // 60000}m")
 
 
 def add_task(title, project_name="Inbox", due_date=str(date.today())):
@@ -477,6 +538,73 @@ def delete_repeat(title_or_id):
     print(f"Deleted repeat '{cfg['title']}'")
 
 
+def add_project(title):
+    parsed = pull()
+    state = parsed["state"]
+
+    project_id = _new_task_id()
+    project = {
+        "id": project_id,
+        "title": title,
+        "isHiddenFromMenu": False,
+        "isArchived": False,
+        "isEnableBacklog": True,
+        "taskIds": [],
+        "backlogTaskIds": [],
+        "noteIds": [],
+        "icon": None,
+        "theme": {
+            "isAutoContrast": True,
+            "isDisableBackgroundTint": False,
+            "primary": "#29a1aa",
+            "huePrimary": "500",
+            "accent": "#ff4081",
+            "hueAccent": "500",
+            "warn": "#e11826",
+            "hueWarn": "500",
+            "backgroundImageDark": None,
+            "backgroundImageLight": None,
+            "backgroundOverlayOpacity": 20,
+        },
+        "advancedCfg": {
+            "worklogExportSettings": {
+                "cols": ["DATE", "START", "END", "TIME_CLOCK", "TITLES_INCLUDING_SUB"],
+                "roundWorkTimeTo": None,
+                "roundStartTimeTo": None,
+                "roundEndTimeTo": None,
+                "separateTasksBy": " | ",
+                "groupBy": "DATE",
+            }
+        },
+    }
+
+    _make_op(parsed, "CRT", "PROJECT", "PA", {"project": project}, project_id)
+
+    state["project"]["entities"][project_id] = project
+    state["project"]["ids"].append(project_id)
+
+    _save(parsed)
+    push()
+    print(f"Created project '{title}' (id={project_id})")
+
+
+def update_project(title_or_id, changes):
+    parsed = pull()
+    state = parsed["state"]
+
+    project_id, project = _find_project_by_title_or_id(state, title_or_id)
+
+    _make_op(parsed, "UPD", "PROJECT", "PC", {
+        "project": {"id": project_id, "changes": changes},
+    }, project_id)
+
+    project.update(changes)
+
+    _save(parsed)
+    push()
+    print(f"Updated project '{project['title']}': {changes}")
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -492,6 +620,8 @@ if __name__ == "__main__":
         dump()
     elif cmd == "dump-repeats":
         dump_repeats()
+    elif cmd == "dump-today":
+        dump_today()
     elif cmd == "add-task" and len(sys.argv) > 2:
         title    = sys.argv[2]
         project  = sys.argv[3] if len(sys.argv) > 3 else "Inbox"
@@ -516,6 +646,10 @@ if __name__ == "__main__":
         update_repeat(sys.argv[2], _parse_kvs(sys.argv[3:]))
     elif cmd == "delete-repeat" and len(sys.argv) > 2:
         delete_repeat(sys.argv[2])
+    elif cmd == "add-project" and len(sys.argv) > 2:
+        add_project(sys.argv[2])
+    elif cmd == "update-project" and len(sys.argv) > 3:
+        update_project(sys.argv[2], _parse_kvs(sys.argv[3:]))
     elif cmd == "pull-push" and len(sys.argv) > 2:
         parsed = pull()
         state = parsed["state"]
