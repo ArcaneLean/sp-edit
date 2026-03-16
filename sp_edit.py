@@ -125,6 +125,22 @@ All dump-* commands accept --json for machine-readable output.
     python3 sp_edit.py update-project "Title or ID" field=value [field=value ...]
         Update project fields. Values are parsed as JSON (strings need quotes).
         Example: update-project "Work" title='"ZZP"'
+
+    python3 sp_edit.py delete-project "Title or ID"
+        Delete a project and all its tasks permanently.
+
+    python3 sp_edit.py archive-project "Title or ID"
+    python3 sp_edit.py unarchive-project "Title or ID"
+        Archive or unarchive a project.
+
+    python3 sp_edit.py add-tag "Title" [color]
+        Create a new tag. Color is optional (e.g. '#ff0000').
+
+    python3 sp_edit.py update-tag "Title or ID" field=value [field=value ...]
+        Update tag fields.
+
+    python3 sp_edit.py delete-tag "Title or ID"
+        Delete a tag and remove it from all tasks.
 """
 
 import base64, gzip, json, subprocess, sys, time, random, string, uuid
@@ -899,6 +915,157 @@ def update_project(title_or_id, changes):
 
 
 # ---------------------------------------------------------------------------
+# Phase 3a — Projects (delete, archive, unarchive)
+# ---------------------------------------------------------------------------
+
+def delete_project(title_or_id):
+    parsed = pull()
+    state = parsed["state"]
+
+    project_id, project = _find_project_by_title_or_id(state, title_or_id)
+    all_task_ids = project.get("taskIds", []) + project.get("backlogTaskIds", [])
+
+    # Delete all tasks in the project
+    for task_id in list(all_task_ids):
+        task = state["task"]["entities"].pop(task_id, None)
+        if task_id in state["task"]["ids"]:
+            state["task"]["ids"].remove(task_id)
+        if task:
+            for tag in state["tag"]["entities"].values():
+                if task_id in tag.get("taskIds", []):
+                    tag["taskIds"].remove(task_id)
+            for day_tasks in state["planner"]["days"].values():
+                if task_id in day_tasks:
+                    day_tasks.remove(task_id)
+
+    _make_op(parsed, "DEL", "TASK", "HDM", {"taskIds": all_task_ids}, all_task_ids[0] if all_task_ids else project_id, all_task_ids or [project_id])
+
+    # Delete the project
+    del state["project"]["entities"][project_id]
+    if project_id in state["project"]["ids"]:
+        state["project"]["ids"].remove(project_id)
+
+    _make_op(parsed, "DEL", "PROJECT", "PDM", {"projectId": project_id}, project_id)
+
+    _save(parsed)
+    push()
+    print(f"Deleted project '{project['title']}' and {len(all_task_ids)} task(s)")
+
+
+def archive_project(title_or_id):
+    parsed = pull()
+    state = parsed["state"]
+
+    project_id, project = _find_project_by_title_or_id(state, title_or_id)
+    project["isArchived"] = True
+
+    _make_op(parsed, "UPD", "PROJECT", "PC", {
+        "project": {"id": project_id, "changes": {"isArchived": True}},
+    }, project_id)
+
+    _save(parsed)
+    push()
+    print(f"Archived project '{project['title']}'")
+
+
+def unarchive_project(title_or_id):
+    parsed = pull()
+    state = parsed["state"]
+
+    project_id, project = _find_project_by_title_or_id(state, title_or_id)
+    project["isArchived"] = False
+
+    _make_op(parsed, "UPD", "PROJECT", "PC", {
+        "project": {"id": project_id, "changes": {"isArchived": False}},
+    }, project_id)
+
+    _save(parsed)
+    push()
+    print(f"Unarchived project '{project['title']}'")
+
+
+# ---------------------------------------------------------------------------
+# Phase 3b — Tags (add, update, delete)
+# ---------------------------------------------------------------------------
+
+def add_tag(title, color=None):
+    parsed = pull()
+    state = parsed["state"]
+    now_ms = int(time.time() * 1000)
+
+    tag_id = _new_task_id()
+    tag = {
+        "id": tag_id,
+        "title": title,
+        "color": color,
+        "created": now_ms,
+        "taskIds": [],
+        "advancedCfg": {
+            "worklogExportSettings": {
+                "cols": ["DATE", "START", "END", "TIME_CLOCK", "TITLES_INCLUDING_SUB"],
+                "roundWorkTimeTo": None,
+                "roundStartTimeTo": None,
+                "roundEndTimeTo": None,
+                "separateTasksBy": " | ",
+                "groupBy": "DATE",
+            }
+        },
+    }
+
+    _make_op(parsed, "CRT", "TAG", "TGA", {"tag": tag}, tag_id)
+
+    state["tag"]["entities"][tag_id] = tag
+    state["tag"]["ids"].append(tag_id)
+
+    _save(parsed)
+    push()
+    print(f"Created tag '{title}' (id={tag_id})")
+
+
+def update_tag(title_or_id, changes):
+    parsed = pull()
+    state = parsed["state"]
+
+    tag_id, tag = _find_tag_entity(state, title_or_id)
+
+    _make_op(parsed, "UPD", "TAG", "TGU", {
+        "tag": {"id": tag_id, "changes": changes},
+    }, tag_id)
+
+    tag.update(changes)
+
+    _save(parsed)
+    push()
+    print(f"Updated tag '{tag['title']}': {changes}")
+
+
+def delete_tag(title_or_id):
+    parsed = pull()
+    state = parsed["state"]
+
+    tag_id, tag = _find_tag_entity(state, title_or_id)
+
+    if tag_id == "TODAY":
+        print("Error: cannot delete the built-in TODAY tag.")
+        sys.exit(1)
+
+    # Strip tag from all tasks
+    for task in state["task"]["entities"].values():
+        if tag_id in task.get("tagIds", []):
+            task["tagIds"].remove(tag_id)
+
+    del state["tag"]["entities"][tag_id]
+    if tag_id in state["tag"]["ids"]:
+        state["tag"]["ids"].remove(tag_id)
+
+    _make_op(parsed, "DEL", "TAG", "TGDM", {"tagIds": [tag_id]}, tag_id)
+
+    _save(parsed)
+    push()
+    print(f"Deleted tag '{tag['title']}'")
+
+
+# ---------------------------------------------------------------------------
 # Phase 2 — Task Enhancements
 # ---------------------------------------------------------------------------
 
@@ -1368,6 +1535,18 @@ if __name__ == "__main__":
         add_project(args[1])
     elif cmd == "update-project" and len(args) > 2:
         update_project(args[1], _parse_kvs(args[2:]))
+    elif cmd == "delete-project" and len(args) > 1:
+        delete_project(args[1])
+    elif cmd == "archive-project" and len(args) > 1:
+        archive_project(args[1])
+    elif cmd == "unarchive-project" and len(args) > 1:
+        unarchive_project(args[1])
+    elif cmd == "add-tag" and len(args) > 1:
+        add_tag(args[1], args[2] if len(args) > 2 else None)
+    elif cmd == "update-tag" and len(args) > 2:
+        update_tag(args[1], _parse_kvs(args[2:]))
+    elif cmd == "delete-tag" and len(args) > 1:
+        delete_tag(args[1])
     elif cmd == "pull-push" and len(args) > 1:
         parsed = pull()
         state = parsed["state"]
