@@ -141,6 +141,21 @@ All dump-* commands accept --json for machine-readable output.
 
     python3 sp_edit.py delete-tag "Title or ID"
         Delete a tag and remove it from all tasks.
+
+    python3 sp_edit.py add-note "Title" [project] [content]
+        Create a note, optionally in a project with markdown content.
+
+    python3 sp_edit.py update-note "Title or ID" field=value [field=value ...]
+        Update note fields.
+
+    python3 sp_edit.py delete-note "Title or ID"
+        Delete a note.
+
+    python3 sp_edit.py pin-note "Title or ID"
+        Pin a note to today (prepends to today's note order).
+
+    python3 sp_edit.py unpin-note "Title or ID"
+        Unpin a note from today.
 """
 
 import base64, gzip, json, subprocess, sys, time, random, string, uuid
@@ -1066,6 +1081,153 @@ def delete_tag(title_or_id):
 
 
 # ---------------------------------------------------------------------------
+# Phase 4 — Notes
+# ---------------------------------------------------------------------------
+
+def _find_note(state, title_or_id):
+    notes = state.get("note", {}).get("entities", {})
+    if title_or_id in notes:
+        return title_or_id, notes[title_or_id]
+    needle = title_or_id.lower()
+    matches = [(nid, n) for nid, n in notes.items() if n.get("title", "").lower() == needle]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        print(f"Error: multiple notes match '{title_or_id}':")
+        for nid, n in matches:
+            print(f"  {nid}  {n['title']}")
+        sys.exit(1)
+    partial = [(nid, n) for nid, n in notes.items() if needle in n.get("title", "").lower()]
+    if len(partial) == 1:
+        return partial[0]
+    if len(partial) > 1:
+        print(f"Error: multiple notes partially match '{title_or_id}':")
+        for nid, n in partial:
+            print(f"  {nid}  {n['title']}")
+        sys.exit(1)
+    print(f"Error: no note found matching '{title_or_id}'")
+    sys.exit(1)
+
+
+def add_note(title, project_name=None, content=""):
+    parsed = pull()
+    state = parsed["state"]
+    now_ms = int(time.time() * 1000)
+
+    project_id = _find_project(state, project_name) if project_name else None
+    note_id = _new_task_id()
+
+    note = {
+        "id": note_id,
+        "title": title,
+        "content": content,
+        "created": now_ms,
+        "modified": now_ms,
+        "projectId": project_id,
+        "isPinnedToToday": False,
+    }
+
+    _make_op(parsed, "CRT", "NOTE", "NA", {"note": note}, note_id)
+
+    state.setdefault("note", {}).setdefault("entities", {})[note_id] = note
+    state["note"].setdefault("ids", []).append(note_id)
+
+    if project_id and project_id in state["project"]["entities"]:
+        state["project"]["entities"][project_id].setdefault("noteIds", []).append(note_id)
+
+    _save(parsed)
+    push()
+    proj_str = f" in '{project_name}'" if project_name else ""
+    print(f"Created note '{title}'{proj_str} (id={note_id})")
+
+
+def update_note(title_or_id, changes):
+    parsed = pull()
+    state = parsed["state"]
+
+    note_id, note = _find_note(state, title_or_id)
+    changes["modified"] = int(time.time() * 1000)
+
+    _make_op(parsed, "UPD", "NOTE", "NU", {
+        "note": {"id": note_id, "changes": changes},
+    }, note_id)
+
+    note.update(changes)
+
+    _save(parsed)
+    push()
+    print(f"Updated note '{note['title']}': {changes}")
+
+
+def delete_note(title_or_id):
+    parsed = pull()
+    state = parsed["state"]
+
+    note_id, note = _find_note(state, title_or_id)
+
+    _make_op(parsed, "DEL", "NOTE", "NDM", {"noteIds": [note_id]}, note_id)
+
+    del state["note"]["entities"][note_id]
+    if note_id in state["note"].get("ids", []):
+        state["note"]["ids"].remove(note_id)
+    if note_id in state["note"].get("todayOrder", []):
+        state["note"]["todayOrder"].remove(note_id)
+
+    proj_id = note.get("projectId")
+    if proj_id and proj_id in state["project"]["entities"]:
+        note_ids = state["project"]["entities"][proj_id].get("noteIds", [])
+        if note_id in note_ids:
+            note_ids.remove(note_id)
+
+    _save(parsed)
+    push()
+    print(f"Deleted note '{note['title']}'")
+
+
+def pin_note(title_or_id):
+    parsed = pull()
+    state = parsed["state"]
+
+    note_id, note = _find_note(state, title_or_id)
+    note["isPinnedToToday"] = True
+    note["modified"] = int(time.time() * 1000)
+
+    today_order = state["note"].setdefault("todayOrder", [])
+    if note_id in today_order:
+        today_order.remove(note_id)
+    today_order.insert(0, note_id)
+
+    _make_op(parsed, "UPD", "NOTE", "NU", {
+        "note": {"id": note_id, "changes": {"isPinnedToToday": True}},
+    }, note_id)
+
+    _save(parsed)
+    push()
+    print(f"Pinned note '{note['title']}' to today")
+
+
+def unpin_note(title_or_id):
+    parsed = pull()
+    state = parsed["state"]
+
+    note_id, note = _find_note(state, title_or_id)
+    note["isPinnedToToday"] = False
+    note["modified"] = int(time.time() * 1000)
+
+    today_order = state["note"].setdefault("todayOrder", [])
+    if note_id in today_order:
+        today_order.remove(note_id)
+
+    _make_op(parsed, "UPD", "NOTE", "NU", {
+        "note": {"id": note_id, "changes": {"isPinnedToToday": False}},
+    }, note_id)
+
+    _save(parsed)
+    push()
+    print(f"Unpinned note '{note['title']}'")
+
+
+# ---------------------------------------------------------------------------
 # Phase 2 — Task Enhancements
 # ---------------------------------------------------------------------------
 
@@ -1547,6 +1709,16 @@ if __name__ == "__main__":
         update_tag(args[1], _parse_kvs(args[2:]))
     elif cmd == "delete-tag" and len(args) > 1:
         delete_tag(args[1])
+    elif cmd == "add-note" and len(args) > 1:
+        add_note(args[1], args[2] if len(args) > 2 else None, args[3] if len(args) > 3 else "")
+    elif cmd == "update-note" and len(args) > 2:
+        update_note(args[1], _parse_kvs(args[2:]))
+    elif cmd == "delete-note" and len(args) > 1:
+        delete_note(args[1])
+    elif cmd == "pin-note" and len(args) > 1:
+        pin_note(args[1])
+    elif cmd == "unpin-note" and len(args) > 1:
+        unpin_note(args[1])
     elif cmd == "pull-push" and len(args) > 1:
         parsed = pull()
         state = parsed["state"]
