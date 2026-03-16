@@ -1,4 +1,4 @@
-# sp-sync
+# sp-edit
 
 A Python script for programmatically reading and editing [Super Productivity](https://super-productivity.com/) tasks via Dropbox sync — no official API required.
 
