@@ -783,42 +783,59 @@ def complete_task(title_or_id):
     print(f"Completed task '{task['title']}'")
 
 
-def delete_task(title_or_id):
-    parsed = pull()
-    state = parsed["state"]
+def _collect_subtask_ids(state, task_id):
+    """Collect task_id + all descendant IDs recursively."""
+    ids = [task_id]
+    task = state["task"]["entities"].get(task_id, {})
+    for sub_id in task.get("subTaskIds", []):
+        ids.extend(_collect_subtask_ids(state, sub_id))
+    return ids
 
-    task_id, task = _find_task(state, title_or_id)
 
-    _make_op(parsed, "DEL", "TASK", "HDM", {
-        "taskIds": [task_id],
-    }, task_id)
-
-    # Remove from entities and ids
-    del state["task"]["entities"][task_id]
+def _remove_task_from_state(state, task_id):
+    """Remove a task entity from state (no ops, no recursion into subtasks)."""
+    task = state["task"]["entities"].pop(task_id, None)
+    if task is None:
+        return
     if task_id in state["task"]["ids"]:
         state["task"]["ids"].remove(task_id)
-
-    # Remove from project (both active and backlog)
     proj_id = task.get("projectId")
     if proj_id and proj_id in state["project"]["entities"]:
         proj = state["project"]["entities"][proj_id]
         for lst in ("taskIds", "backlogTaskIds"):
             if task_id in proj.get(lst, []):
                 proj[lst].remove(task_id)
-
-    # Remove from all tags
+    parent_id = task.get("parentId")
+    if parent_id and parent_id in state["task"]["entities"]:
+        parent = state["task"]["entities"][parent_id]
+        if task_id in parent.get("subTaskIds", []):
+            parent["subTaskIds"].remove(task_id)
     for tag in state["tag"]["entities"].values():
         if task_id in tag.get("taskIds", []):
             tag["taskIds"].remove(task_id)
-
-    # Remove from planner
     for day_tasks in state["planner"]["days"].values():
         if task_id in day_tasks:
             day_tasks.remove(task_id)
 
+
+def delete_task(title_or_id):
+    parsed = pull()
+    state = parsed["state"]
+
+    task_id, task = _find_task(state, title_or_id)
+
+    # Collect parent + all descendants for one HDM op
+    all_ids = _collect_subtask_ids(state, task_id)
+    _make_op(parsed, "DEL", "TASK", "HDM", {"taskIds": all_ids}, task_id)
+
+    for tid in all_ids:
+        _remove_task_from_state(state, tid)
+
     _save(parsed)
     push()
-    print(f"Deleted task '{task['title']}'")
+    n = len(all_ids)
+    suffix = f" (+ {n-1} subtask{'s' if n-1 != 1 else ''})" if n > 1 else ""
+    print(f"Deleted task '{task['title']}'{suffix}")
 
 
 def update_task(title_or_id, changes):
@@ -1015,22 +1032,17 @@ def delete_project(title_or_id):
     state = parsed["state"]
 
     project_id, project = _find_project_by_title_or_id(state, title_or_id)
-    all_task_ids = project.get("taskIds", []) + project.get("backlogTaskIds", [])
+    top_task_ids = project.get("taskIds", []) + project.get("backlogTaskIds", [])
 
-    # Delete all tasks in the project
-    for task_id in list(all_task_ids):
-        task = state["task"]["entities"].pop(task_id, None)
-        if task_id in state["task"]["ids"]:
-            state["task"]["ids"].remove(task_id)
-        if task:
-            for tag in state["tag"]["entities"].values():
-                if task_id in tag.get("taskIds", []):
-                    tag["taskIds"].remove(task_id)
-            for day_tasks in state["planner"]["days"].values():
-                if task_id in day_tasks:
-                    day_tasks.remove(task_id)
+    # Expand to include all subtasks
+    all_task_ids = []
+    for tid in top_task_ids:
+        all_task_ids.extend(_collect_subtask_ids(state, tid))
 
-    _make_op(parsed, "DEL", "TASK", "HDM", {"taskIds": all_task_ids}, all_task_ids[0] if all_task_ids else project_id, all_task_ids or [project_id])
+    if all_task_ids:
+        _make_op(parsed, "DEL", "TASK", "HDM", {"taskIds": all_task_ids}, all_task_ids[0])
+    for tid in all_task_ids:
+        _remove_task_from_state(state, tid)
 
     # Delete the project
     del state["project"]["entities"][project_id]
@@ -1696,17 +1708,8 @@ def delete_subtask(title_or_id):
     state = parsed["state"]
 
     task_id, task = _find_task(state, title_or_id)
-    parent_id = task.get("parentId")
-
     _make_op(parsed, "DEL", "TASK", "HDM", {"taskIds": [task_id]}, task_id)
-
-    del state["task"]["entities"][task_id]
-    if task_id in state["task"]["ids"]:
-        state["task"]["ids"].remove(task_id)
-    if parent_id and parent_id in state["task"]["entities"]:
-        parent = state["task"]["entities"][parent_id]
-        if task_id in parent.get("subTaskIds", []):
-            parent["subTaskIds"].remove(task_id)
+    _remove_task_from_state(state, task_id)
 
     _save(parsed)
     push()
