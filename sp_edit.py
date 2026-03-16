@@ -171,17 +171,63 @@ All dump-* commands accept --json for machine-readable output.
 
     python3 sp_edit.py set-counter "Title or ID" <value>
         Set today's counter value to an exact number.
+
+    python3 sp_edit.py complete-done-today
+        Mark all incomplete tasks scheduled for today as done.
+
+    python3 sp_edit.py delete-done-tasks [project]
+        Delete all completed tasks, optionally filtered by project.
+
+    python3 sp_edit.py move-done-to-archive
+        Move all completed tasks to archiveYoung.
+
+    python3 sp_edit.py restore-task "Title or ID"
+        Move an archived task back to active state.
+
+Global flags (can be combined with any command):
+    --dry-run   Show what would be pushed without uploading.
+    --no-pull   Skip downloading; use existing /tmp/sp_state.json.
+    --no-push   Save changes locally but do not upload.
+
+Config file (~/.sp_edit.conf, JSON) or env vars:
+    SP_EDIT_REMOTE        rclone remote name   (default: dropbox)
+    SP_EDIT_REMOTE_PATH   path on remote       (default: Apps/super_productivity/sync-data.json)
+    SP_EDIT_CLIENT_ID     vector clock ID      (default: C_claud)
+    SP_EDIT_LOCAL_RAW     local raw file       (default: /tmp/sp_raw.json)
+    SP_EDIT_LOCAL_STATE   local state file     (default: /tmp/sp_state.json)
 """
 
-import base64, gzip, json, subprocess, sys, time, random, string, uuid
+import base64, gzip, json, os, subprocess, sys, time, random, string, uuid
 from pathlib import Path
 from datetime import date
 
-DROPBOX_PATH = "dropbox:Apps/super_productivity/sync-data.json"
-LOCAL_RAW    = "/tmp/sp_raw.json"
-LOCAL_STATE  = "/tmp/sp_state.json"
-PREFIX       = "pf_C2__"
-CLIENT_ID    = "C_claud"
+# ---------------------------------------------------------------------------
+# Config — ~/.sp_edit.conf (JSON) overrides defaults; env vars override that
+# ---------------------------------------------------------------------------
+
+_conf = {}
+_conf_path = Path.home() / ".sp_edit.conf"
+if _conf_path.exists():
+    try:
+        _conf = json.loads(_conf_path.read_text())
+    except Exception:
+        pass
+
+def _cfg(key, default):
+    return os.environ.get(key) or _conf.get(key) or default
+
+RCLONE_REMOTE = _cfg("SP_EDIT_REMOTE", "dropbox")
+REMOTE_PATH   = _cfg("SP_EDIT_REMOTE_PATH", "Apps/super_productivity/sync-data.json")
+DROPBOX_PATH  = f"{RCLONE_REMOTE}:{REMOTE_PATH}"
+LOCAL_RAW     = _cfg("SP_EDIT_LOCAL_RAW", "/tmp/sp_raw.json")
+LOCAL_STATE   = _cfg("SP_EDIT_LOCAL_STATE", "/tmp/sp_state.json")
+PREFIX        = "pf_C2__"
+CLIENT_ID     = _cfg("SP_EDIT_CLIENT_ID", "C_claud")
+
+# Runtime flags — set from CLI args in __main__
+_DRY_RUN = False
+_NO_PULL = False
+_NO_PUSH = False
 
 DAY_FIELDS   = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 DAY_ALIASES  = {
@@ -196,6 +242,12 @@ DAY_ALIASES  = {
 
 def pull():
     """Download and decompress from Dropbox -> /tmp/sp_state.json"""
+    if _NO_PULL:
+        if not Path(LOCAL_STATE).exists():
+            print(f"Error: --no-pull specified but {LOCAL_STATE} does not exist. Run pull first.")
+            sys.exit(1)
+        with open(LOCAL_STATE) as f:
+            return json.load(f)
     print("Downloading from Dropbox...")
     subprocess.run(["rclone", "copyto", DROPBOX_PATH, LOCAL_RAW], check=True)
     with open(LOCAL_RAW, "r") as f:
@@ -212,6 +264,12 @@ def pull():
 
 def push():
     """Compress /tmp/sp_state.json and upload to Dropbox"""
+    if _DRY_RUN:
+        print("[dry-run] Would push state to Dropbox — no changes made.")
+        return
+    if _NO_PUSH:
+        print(f"[no-push] State saved to {LOCAL_STATE} but not uploaded.")
+        return
     with open(LOCAL_STATE, "r") as f:
         parsed = json.load(f)
 
@@ -1376,6 +1434,178 @@ def decrement_counter(title_or_id, amount=1):
 
 
 # ---------------------------------------------------------------------------
+# Phase 6 — Batch Operations & Archive
+# ---------------------------------------------------------------------------
+
+def complete_done_today():
+    parsed = pull()
+    state = parsed["state"]
+    tasks = state["task"]["entities"]
+    today = str(date.today())
+
+    targets = [
+        (tid, t) for tid, t in tasks.items()
+        if not t.get("isDone")
+        and (t.get("dueDay") == today or "TODAY" in t.get("tagIds", []))
+    ]
+    if not targets:
+        print("No incomplete tasks scheduled for today.")
+        return
+
+    for task_id, task in targets:
+        task["isDone"] = True
+        _make_op(parsed, "UPD", "TASK", "HU", {
+            "task": {"id": task_id, "changes": {"isDone": True}},
+        }, task_id)
+
+    _save(parsed)
+    push()
+    print(f"Completed {len(targets)} task(s): {[t['title'] for _, t in targets]}")
+
+
+def delete_done_tasks(project_name=None):
+    parsed = pull()
+    state = parsed["state"]
+    tasks = state["task"]["entities"]
+
+    project_id = None
+    if project_name:
+        project_id = _find_project(state, project_name)
+
+    targets = [
+        (tid, t) for tid, t in list(tasks.items())
+        if t.get("isDone") and not t.get("parentId")
+        and (project_id is None or t.get("projectId") == project_id)
+    ]
+    if not targets:
+        print("No done tasks found.")
+        return
+
+    all_ids = [tid for tid, _ in targets]
+    _make_op(parsed, "DEL", "TASK", "HDM", {"taskIds": all_ids}, all_ids[0], all_ids)
+
+    for task_id, task in targets:
+        del state["task"]["entities"][task_id]
+        if task_id in state["task"]["ids"]:
+            state["task"]["ids"].remove(task_id)
+        proj = state["project"]["entities"].get(task.get("projectId", ""))
+        if proj:
+            for lst in ("taskIds", "backlogTaskIds"):
+                if task_id in proj.get(lst, []):
+                    proj[lst].remove(task_id)
+        for tag in state["tag"]["entities"].values():
+            if task_id in tag.get("taskIds", []):
+                tag["taskIds"].remove(task_id)
+        for day_tasks in state["planner"]["days"].values():
+            if task_id in day_tasks:
+                day_tasks.remove(task_id)
+
+    _save(parsed)
+    push()
+    scope = f" in '{project_name}'" if project_name else ""
+    print(f"Deleted {len(targets)} done task(s){scope}")
+
+
+def move_done_to_archive():
+    parsed = pull()
+    state = parsed["state"]
+    tasks = state["task"]["entities"]
+
+    targets = [
+        (tid, t) for tid, t in list(tasks.items())
+        if t.get("isDone") and not t.get("parentId")
+    ]
+    if not targets:
+        print("No done tasks to archive.")
+        return
+
+    archive = state.setdefault("archiveYoung", {})
+    arch_tasks = archive.setdefault("task", {})
+    arch_entities = arch_tasks.setdefault("entities", {})
+    arch_ids = arch_tasks.setdefault("ids", [])
+
+    all_ids = [tid for tid, _ in targets]
+    _make_op(parsed, "DEL", "TASK", "HDM", {"taskIds": all_ids}, all_ids[0], all_ids)
+
+    for task_id, task in targets:
+        arch_entities[task_id] = task
+        if task_id not in arch_ids:
+            arch_ids.append(task_id)
+        del state["task"]["entities"][task_id]
+        if task_id in state["task"]["ids"]:
+            state["task"]["ids"].remove(task_id)
+        proj = state["project"]["entities"].get(task.get("projectId", ""))
+        if proj:
+            for lst in ("taskIds", "backlogTaskIds"):
+                if task_id in proj.get(lst, []):
+                    proj[lst].remove(task_id)
+        for tag in state["tag"]["entities"].values():
+            if task_id in tag.get("taskIds", []):
+                tag["taskIds"].remove(task_id)
+        for day_tasks in state["planner"]["days"].values():
+            if task_id in day_tasks:
+                day_tasks.remove(task_id)
+
+    _save(parsed)
+    push()
+    print(f"Archived {len(targets)} done task(s) to archiveYoung")
+
+
+def restore_task(title_or_id):
+    parsed = pull()
+    state = parsed["state"]
+
+    # Search archive
+    found_task = None
+    found_id = None
+    found_key = None
+    for archive_key in ("archiveYoung", "archiveOld"):
+        arch_tasks = state.get(archive_key, {}).get("task", {}).get("entities", {})
+        for tid, t in arch_tasks.items():
+            if tid == title_or_id or t.get("title", "").lower() == title_or_id.lower():
+                found_task = t
+                found_id = tid
+                found_key = archive_key
+                break
+        if found_task:
+            break
+
+    if not found_task:
+        print(f"Error: no archived task found matching '{title_or_id}'")
+        sys.exit(1)
+
+    # Move back to active state
+    state["task"]["entities"][found_id] = found_task
+    if found_id not in state["task"]["ids"]:
+        state["task"]["ids"].append(found_id)
+
+    # Re-add to project
+    proj_id = found_task.get("projectId")
+    if proj_id and proj_id in state["project"]["entities"]:
+        proj = state["project"]["entities"][proj_id]
+        if found_id not in proj.get("taskIds", []):
+            proj.setdefault("taskIds", []).append(found_id)
+
+    # Remove from archive
+    arch = state[found_key]["task"]
+    del arch["entities"][found_id]
+    if found_id in arch.get("ids", []):
+        arch["ids"].remove(found_id)
+
+    _make_op(parsed, "CRT", "TASK", "HA", {
+        "task": found_task,
+        "workContextId": proj_id or "TODAY",
+        "workContextType": "PROJECT" if proj_id else "TAG",
+        "isAddToBacklog": False,
+        "isAddToBottom": True,
+    }, found_id)
+
+    _save(parsed)
+    push()
+    print(f"Restored task '{found_task['title']}' from {found_key}")
+
+
+# ---------------------------------------------------------------------------
 # Phase 2 — Task Enhancements
 # ---------------------------------------------------------------------------
 
@@ -1755,8 +1985,12 @@ def move_task_to_bottom(title_or_id):
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    args = [a for a in sys.argv[1:] if a != "--json"]
-    json_out = "--json" in sys.argv
+    _flags = {"--json", "--dry-run", "--no-pull", "--no-push"}
+    args = [a for a in sys.argv[1:] if a not in _flags]
+    json_out  = "--json"     in sys.argv
+    _DRY_RUN  = "--dry-run"  in sys.argv
+    _NO_PULL  = "--no-pull"  in sys.argv
+    _NO_PUSH  = "--no-push"  in sys.argv
     cmd = args[0] if args else "dump"
 
     if cmd == "pull":
@@ -1877,6 +2111,14 @@ if __name__ == "__main__":
         decrement_counter(args[1], args[2] if len(args) > 2 else 1)
     elif cmd == "set-counter" and len(args) > 2:
         set_counter(args[1], args[2])
+    elif cmd == "complete-done-today":
+        complete_done_today()
+    elif cmd == "delete-done-tasks":
+        delete_done_tasks(args[1] if len(args) > 1 else None)
+    elif cmd == "move-done-to-archive":
+        move_done_to_archive()
+    elif cmd == "restore-task" and len(args) > 1:
+        restore_task(args[1])
     elif cmd == "pull-push" and len(args) > 1:
         parsed = pull()
         state = parsed["state"]
