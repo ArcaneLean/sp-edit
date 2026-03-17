@@ -120,14 +120,20 @@ All dump-* commands accept --json for machine-readable output.
 
     python3 sp_edit.py update-project "Title or ID" field=value [field=value ...]
         Update project fields. Values are parsed as JSON (strings need quotes).
-        Example: update-project "Work" title='"ZZP"'
+        Flat fields:
+          title="New Name"          icon="inbox"
+          isEnableBacklog=true      isHiddenFromMenu=true
+        Theme fields (use dotted notation):
+          theme.primary="#ff0000"   theme.accent="#ff4081"   theme.warn="#e11826"
+          theme.isAutoContrast=true theme.isDisableBackgroundTint=false
+          theme.backgroundImageDark="https://..." theme.backgroundImageLight="https://..."
+        Example: update-project "Work" title='"ZZP"' theme.primary='"#c0392b"'
 
     python3 sp_edit.py delete-project "Title or ID"
         Delete a project and all its tasks permanently.
+        Use update-project isHiddenFromMenu=true/false to hide/show a project.
 
-    python3 sp_edit.py archive-project "Title or ID"
-    python3 sp_edit.py unarchive-project "Title or ID"
-        Archive or unarchive a project.
+
 
     python3 sp_edit.py add-tag "Title" [color]
         Create a new tag. Color is optional (e.g. '#ff0000').
@@ -1008,15 +1014,22 @@ def update_project(title_or_id, changes):
 
     project_id, project = _find_project_by_title_or_id(state, title_or_id)
 
-    _make_op(parsed, "UPD", "PROJECT", "PC", {
-        "project": {"id": project_id, "changes": changes},
+    # Merge theme.xxx dotted keys into a full theme object
+    flat = {k: v for k, v in changes.items() if not k.startswith("theme.")}
+    theme_updates = {k[len("theme."):]: v for k, v in changes.items() if k.startswith("theme.")}
+    if theme_updates:
+        merged_theme = {**project.get("theme", {}), **theme_updates}
+        flat["theme"] = merged_theme
+
+    _make_op(parsed, "UPD", "PROJECT", "PU", {
+        "project": {"id": project_id, "changes": flat},
     }, project_id)
 
-    project.update(changes)
+    project.update(flat)
 
     _save(parsed)
     push()
-    print(f"Updated project '{project['title']}': {changes}")
+    print(f"Updated project '{project['title']}': {flat}")
 
 
 # ---------------------------------------------------------------------------
@@ -1030,58 +1043,33 @@ def delete_project(title_or_id):
     project_id, project = _find_project_by_title_or_id(state, title_or_id)
     top_task_ids = project.get("taskIds", []) + project.get("backlogTaskIds", [])
 
-    # Expand to include all subtasks
     all_task_ids = []
     for tid in top_task_ids:
         all_task_ids.extend(_collect_subtask_ids(state, tid))
 
-    if all_task_ids:
-        _make_op(parsed, "DEL", "TASK", "HDM", {"taskIds": all_task_ids}, all_task_ids[0])
+    # Collect note IDs belonging to this project
+    note_ids = [nid for nid, n in state.get("note", {}).get("entities", {}).items()
+                if n.get("projectId") == project_id]
+
+    _make_op(parsed, "DEL", "PROJECT", "HPD", {
+        "projectId": project_id,
+        "noteIds": note_ids,
+        "allTaskIds": all_task_ids,
+    }, project_id)
+
     for tid in all_task_ids:
         _remove_task_from_state(state, tid)
-
-    # Delete the project
+    for nid in note_ids:
+        state["note"]["entities"].pop(nid, None)
+        if nid in state["note"].get("ids", []):
+            state["note"]["ids"].remove(nid)
     del state["project"]["entities"][project_id]
     if project_id in state["project"]["ids"]:
         state["project"]["ids"].remove(project_id)
 
-    _make_op(parsed, "DEL", "PROJECT", "PDM", {"projectId": project_id}, project_id)
-
     _save(parsed)
     push()
-    print(f"Deleted project '{project['title']}' and {len(all_task_ids)} task(s)")
-
-
-def archive_project(title_or_id):
-    parsed = pull()
-    state = parsed["state"]
-
-    project_id, project = _find_project_by_title_or_id(state, title_or_id)
-    project["isArchived"] = True
-
-    _make_op(parsed, "UPD", "PROJECT", "PC", {
-        "project": {"id": project_id, "changes": {"isArchived": True}},
-    }, project_id)
-
-    _save(parsed)
-    push()
-    print(f"Archived project '{project['title']}'")
-
-
-def unarchive_project(title_or_id):
-    parsed = pull()
-    state = parsed["state"]
-
-    project_id, project = _find_project_by_title_or_id(state, title_or_id)
-    project["isArchived"] = False
-
-    _make_op(parsed, "UPD", "PROJECT", "PC", {
-        "project": {"id": project_id, "changes": {"isArchived": False}},
-    }, project_id)
-
-    _save(parsed)
-    push()
-    print(f"Unarchived project '{project['title']}'")
+    print(f"Deleted project '{project['title']}' ({len(all_task_ids)} task(s), {len(note_ids)} note(s))")
 
 
 # ---------------------------------------------------------------------------
@@ -2104,10 +2092,7 @@ if __name__ == "__main__":
         update_project(args[1], _parse_kvs(args[2:]))
     elif cmd == "delete-project" and len(args) > 1:
         delete_project(args[1])
-    elif cmd == "archive-project" and len(args) > 1:
-        archive_project(args[1])
-    elif cmd == "unarchive-project" and len(args) > 1:
-        unarchive_project(args[1])
+
     elif cmd == "add-tag" and len(args) > 1:
         add_tag(args[1], args[2] if len(args) > 2 else None)
     elif cmd == "update-tag" and len(args) > 2:
