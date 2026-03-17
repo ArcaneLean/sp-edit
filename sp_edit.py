@@ -34,13 +34,13 @@ Usage:
         Update task fields. Values are parsed as JSON (strings need quotes).
         Example: update-task "Buy milk" title='"Buy oat milk"' dueDay='"2026-03-20"'
 
-    python3 sp_edit.py add-repeat "Title" project cycle days [start_time] [estimate_min]
+    python3 sp_edit.py make-task-recurring "Title or ID" cycle days [start_time] [estimate_min]
         Create a recurring task.
         cycle:      DAILY | WEEKLY | MONTHLY
         days:       comma-separated: mon,tue,wed,thu,fri,sat,sun  (or 'all' / 'weekdays')
         start_time: HH:MM  (optional, default none)
         estimate_min: integer minutes (optional, default 0)
-        Example: add-repeat "Standup" Work DAILY mon,tue,wed,thu,fri 09:30 15
+        Example: make-task-recurring "Standup" DAILY weekdays 09:30 15
 
     python3 sp_edit.py update-repeat "Title or ID" field=value [field=value ...]
         Update a recurring task config fields.
@@ -870,15 +870,18 @@ def update_task(title_or_id, changes):
     print(f"Updated task '{task['title']}': {changes}")
 
 
-def add_repeat(title, project_name, repeat_cycle, days_str, start_time=None, estimate_min=0):
+def make_task_recurring(title_or_id, repeat_cycle, days_str, start_time=None, estimate_min=0):
     parsed = pull()
     state = parsed["state"]
     now_ms = int(time.time() * 1000)
+    today = str(date.today())
 
-    project_id = _find_project(state, project_name)
+    task_id, task = _find_task(state, title_or_id)
+    if task.get("repeatCfgId"):
+        sys.exit(f"Error: '{task['title']}' is already recurring (id={task['repeatCfgId']})")
+
     repeat_id = _new_task_id()
 
-    # Parse days
     if days_str.lower() == "all":
         active_days = {d: True for d in DAY_FIELDS}
     elif days_str.lower() == "weekdays":
@@ -889,19 +892,22 @@ def add_repeat(title, project_name, repeat_cycle, days_str, start_time=None, est
 
     cfg = {
         "id": repeat_id,
-        "title": title,
-        "projectId": project_id,
-        "tagIds": [],
+        "title": task["title"],
+        "projectId": task.get("projectId"),
+        "tagIds": list(task.get("tagIds", [])),
         "repeatCycle": repeat_cycle.upper(),
         "quickSetting": repeat_cycle.upper(),
         "repeatEvery": 1,
         "repeatFromCompletionDate": False,
         "isPaused": False,
         "defaultEstimate": estimate_min * 60000,
-        "startDate": str(date.today()),
+        "startDate": today,
+        "lastTaskCreation": now_ms,
+        "lastTaskCreationDay": today,
         "order": 0,
         "shouldInheritSubtasks": False,
         "disableAutoUpdateSubtasks": False,
+        "skipOverdue": False,
         "subTaskTemplates": [],
         **active_days,
     }
@@ -911,15 +917,17 @@ def add_repeat(title, project_name, repeat_cycle, days_str, start_time=None, est
 
     _make_op(parsed, "CRT", "TASK_REPEAT_CFG", "RA", {
         "taskRepeatCfg": cfg,
+        "taskId": task_id,
     }, repeat_id)
 
     state["taskRepeatCfg"]["entities"][repeat_id] = cfg
     state["taskRepeatCfg"]["ids"].append(repeat_id)
+    task["repeatCfgId"] = repeat_id
 
     _save(parsed)
     push()
     days_active = [d for d in DAY_FIELDS if active_days.get(d)]
-    print(f"Created repeat '{title}' in '{project_name}' ({repeat_cycle}, {days_active})")
+    print(f"Made '{task['title']}' recurring ({repeat_cycle}, {days_active})")
 
 
 def update_repeat(title_or_id, changes):
@@ -930,6 +938,7 @@ def update_repeat(title_or_id, changes):
 
     _make_op(parsed, "UPD", "TASK_REPEAT_CFG", "RU", {
         "taskRepeatCfg": {"id": repeat_id, "changes": changes},
+        "isAskToUpdateAllTaskInstances": False,
     }, repeat_id)
 
     cfg.update(changes)
@@ -1130,15 +1139,20 @@ def update_tag(title_or_id, changes):
 
     tag_id, tag = _find_tag_entity(state, title_or_id)
 
+    flat = {k: v for k, v in changes.items() if not k.startswith("theme.")}
+    theme_updates = {k[len("theme."):]: v for k, v in changes.items() if k.startswith("theme.")}
+    if theme_updates:
+        flat["theme"] = {**tag.get("theme", {}), **theme_updates}
+
     _make_op(parsed, "UPD", "TAG", "GU", {
-        "tag": {"id": tag_id, "changes": changes},
+        "tag": {"id": tag_id, "changes": flat},
     }, tag_id)
 
-    tag.update(changes)
+    tag.update(flat)
 
     _save(parsed)
     push()
-    print(f"Updated tag '{tag['title']}': {changes}")
+    print(f"Updated tag '{tag['title']}': {flat}")
 
 
 def delete_tag(title_or_id):
@@ -2074,14 +2088,12 @@ if __name__ == "__main__":
         delete_task(args[1])
     elif cmd == "update-task" and len(args) > 2:
         update_task(args[1], _parse_kvs(args[2:]))
-    elif cmd == "add-repeat" and len(args) > 4:
-        title       = args[1]
-        project     = args[2]
-        cycle       = args[3]
-        days        = args[4]
-        start_time  = args[5] if len(args) > 5 else None
-        est_min     = int(args[6]) if len(args) > 6 else 0
-        add_repeat(title, project, cycle, days, start_time, est_min)
+    elif cmd == "make-task-recurring" and len(args) > 3:
+        cycle      = args[2]
+        days       = args[3]
+        start_time = args[4] if len(args) > 4 else None
+        est_min    = int(args[5]) if len(args) > 5 else 0
+        make_task_recurring(args[1], cycle, days, start_time, est_min)
     elif cmd == "update-repeat" and len(args) > 2:
         update_repeat(args[1], _parse_kvs(args[2:]))
     elif cmd == "delete-repeat" and len(args) > 1:
