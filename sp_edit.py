@@ -882,7 +882,15 @@ def make_task_recurring(title_or_id, repeat_cycle, days_str, start_time=None, es
 
     repeat_id = _new_task_id()
 
-    if days_str.lower() == "all":
+    # days_str can be a number (e.g. "14" = every 14 days) or day names
+    repeat_every = 1
+    repeat_from_completion = False
+    active_days = {}
+    if days_str.isdigit():
+        repeat_every = int(days_str)
+        repeat_from_completion = True
+        # no day-of-week fields for interval-based repeats
+    elif days_str.lower() == "all":
         active_days = {d: True for d in DAY_FIELDS}
     elif days_str.lower() == "weekdays":
         active_days = {d: d not in ("saturday", "sunday") for d in DAY_FIELDS}
@@ -890,24 +898,25 @@ def make_task_recurring(title_or_id, repeat_cycle, days_str, start_time=None, es
         selected = {DAY_ALIASES.get(d.strip(), d.strip()) for d in days_str.split(",")}
         active_days = {d: d in selected for d in DAY_FIELDS}
 
+    is_custom = repeat_every > 1 or repeat_cycle.upper() not in ("DAILY",)
+
     cfg = {
         "id": repeat_id,
         "title": task["title"],
         "projectId": task.get("projectId"),
-        "tagIds": list(task.get("tagIds", [])),
+        "tagIds": [],
         "repeatCycle": repeat_cycle.upper(),
-        "quickSetting": repeat_cycle.upper(),
-        "repeatEvery": 1,
-        "repeatFromCompletionDate": False,
+        "quickSetting": "CUSTOM" if is_custom else "DAILY",
+        "repeatEvery": repeat_every,
+        "repeatFromCompletionDate": repeat_from_completion,
         "isPaused": False,
-        "defaultEstimate": estimate_min * 60000,
-        "startDate": today,
+        "defaultEstimate": int(estimate_min) * 60000,
+        "startDate": "1970-01-01" if repeat_every > 1 else today,
         "lastTaskCreation": now_ms,
         "lastTaskCreationDay": today,
         "order": 0,
         "shouldInheritSubtasks": False,
         "disableAutoUpdateSubtasks": False,
-        "skipOverdue": False,
         "subTaskTemplates": [],
         **active_days,
     }
@@ -935,6 +944,12 @@ def update_repeat(title_or_id, changes):
     state = parsed["state"]
 
     repeat_id, cfg = _find_repeat(state, title_or_id)
+
+    if int(changes.get("repeatEvery", 1)) > 1:
+        changes.setdefault("quickSetting", "CUSTOM")
+        for day in DAY_FIELDS:
+            changes.setdefault(day, False)
+            cfg.pop(day, None)
 
     _make_op(parsed, "UPD", "TASK_REPEAT_CFG", "RU", {
         "taskRepeatCfg": {"id": repeat_id, "changes": changes},
@@ -1359,7 +1374,7 @@ def _find_counter(state, title_or_id):
     sys.exit(1)
 
 
-def add_counter(title, counter_type="clicks"):
+def add_counter(title):
     parsed = pull()
     state = parsed["state"]
 
@@ -1371,19 +1386,26 @@ def add_counter(title, counter_type="clicks"):
     counter = {
         "id": counter_id,
         "title": title,
-        "type": counter_type,
+        "isEnabled": True,
+        "icon": None,
+        "type": "ClickCounter",
         "countOnDay": {},
-        "order": order,
+        "isOn": False,
+        "isTrackStreaks": True,
+        "streakMinValue": 1,
+        "streakMode": "specific-days",
+        "streakWeekDays": {"0": False, "1": True, "2": True, "3": True, "4": True, "5": True, "6": False},
+        "streakWeeklyFrequency": 3,
     }
 
-    _make_op(parsed, "CRT", "SIMPLE_COUNTER", "SCA", {"simpleCounter": counter}, counter_id)
+    _make_op(parsed, "CRT", "SIMPLE_COUNTER", "SA", {"simpleCounter": counter}, counter_id)
 
     counters.setdefault("entities", {})[counter_id] = counter
     counters.setdefault("ids", []).append(counter_id)
 
     _save(parsed)
     push()
-    print(f"Created counter '{title}' (type={counter_type}, id={counter_id})")
+    print(f"Created counter '{title}' (id={counter_id})")
 
 
 def delete_counter(title_or_id):
@@ -1392,7 +1414,7 @@ def delete_counter(title_or_id):
 
     counter_id, counter = _find_counter(state, title_or_id)
 
-    _make_op(parsed, "DEL", "SIMPLE_COUNTER", "SCDM", {"counterIds": [counter_id]}, counter_id)
+    _make_op(parsed, "DEL", "SIMPLE_COUNTER", "SD", {"id": counter_id}, counter_id)
 
     del state["simpleCounter"]["entities"][counter_id]
     if counter_id in state["simpleCounter"].get("ids", []):
@@ -1411,8 +1433,10 @@ def _set_counter_value(title_or_id, value):
     counter_id, counter = _find_counter(state, title_or_id)
     counter.setdefault("countOnDay", {})[today] = value
 
-    _make_op(parsed, "UPD", "SIMPLE_COUNTER", "SCU", {
-        "simpleCounter": {"id": counter_id, "changes": {"countOnDay": counter["countOnDay"]}},
+    _make_op(parsed, "UPD", "SIMPLE_COUNTER", "SFD", {
+        "id": counter_id,
+        "newVal": value,
+        "date": today,
     }, counter_id)
 
     _save(parsed)
@@ -1435,8 +1459,10 @@ def increment_counter(title_or_id, amount=1):
     new_val = current + int(amount)
     counter.setdefault("countOnDay", {})[today] = new_val
 
-    _make_op(parsed, "UPD", "SIMPLE_COUNTER", "SCU", {
-        "simpleCounter": {"id": counter_id, "changes": {"countOnDay": counter["countOnDay"]}},
+    _make_op(parsed, "UPD", "SIMPLE_COUNTER", "SFD", {
+        "id": counter_id,
+        "newVal": new_val,
+        "date": today,
     }, counter_id)
 
     _save(parsed)
@@ -1454,8 +1480,10 @@ def decrement_counter(title_or_id, amount=1):
     new_val = current - int(amount)
     counter.setdefault("countOnDay", {})[today] = new_val
 
-    _make_op(parsed, "UPD", "SIMPLE_COUNTER", "SCU", {
-        "simpleCounter": {"id": counter_id, "changes": {"countOnDay": counter["countOnDay"]}},
+    _make_op(parsed, "UPD", "SIMPLE_COUNTER", "SFD", {
+        "id": counter_id,
+        "newVal": new_val,
+        "date": today,
     }, counter_id)
 
     _save(parsed)
@@ -1635,12 +1663,10 @@ def restore_task(title_or_id):
     if found_id in arch.get("ids", []):
         arch["ids"].remove(found_id)
 
-    _make_op(parsed, "CRT", "TASK", "HA", {
-        "task": found_task,
-        "workContextId": proj_id or "TODAY",
-        "workContextType": "PROJECT" if proj_id else "TAG",
-        "isAddToBacklog": False,
-        "isAddToBottom": True,
+    subtasks = [state["task"]["entities"].get(s, {}) for s in found_task.get("subTaskIds", [])]
+    _make_op(parsed, "UPD", "TASK", "HR", {
+        "task": {**found_task, "subTasks": subtasks},
+        "subTasks": subtasks,
     }, found_id)
 
     _save(parsed)
@@ -2093,8 +2119,9 @@ if __name__ == "__main__":
     elif cmd == "make-task-recurring" and len(args) > 3:
         cycle      = args[2]
         days       = args[3]
-        start_time = args[4] if len(args) > 4 else None
-        est_min    = int(args[5]) if len(args) > 5 else 0
+        raw_time   = args[4] if len(args) > 4 else None
+        start_time = raw_time if raw_time and ":" in raw_time else None
+        est_min    = int(args[5]) if len(args) > 5 else (int(args[4]) if raw_time and ":" not in raw_time and raw_time else 0)
         make_task_recurring(args[1], cycle, days, start_time, est_min)
     elif cmd == "update-repeat" and len(args) > 2:
         update_repeat(args[1], _parse_kvs(args[2:]))
@@ -2124,7 +2151,7 @@ if __name__ == "__main__":
     elif cmd == "unpin-note" and len(args) > 1:
         unpin_note(args[1])
     elif cmd == "add-counter" and len(args) > 1:
-        add_counter(args[1], args[2] if len(args) > 2 else "clicks")
+        add_counter(args[1])
     elif cmd == "delete-counter" and len(args) > 1:
         delete_counter(args[1])
     elif cmd == "increment-counter" and len(args) > 1:
