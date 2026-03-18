@@ -75,6 +75,15 @@ Usage:
     python3 sp_edit.py dump-archive
         List archived tasks (archiveYoung + archiveOld).
 
+    python3 sp_edit.py dump-time-tracked [project]
+        List all time-tracked entries (active + archive), grouped by date.
+        Optional project filter. Includes per-day breakdown and total.
+
+    python3 sp_edit.py dump-time-log [project] [YYYY-MM-DD]
+        Show start/end times for each tracked session today (or given date).
+        Reconstructed from 5-minute heartbeat ops; accurate to ~1 minute.
+        Optional project and/or date filter.
+
 All dump-* commands accept --json for machine-readable output.
 
     python3 sp_edit.py add-subtask "Title" "ParentTitle or ID"
@@ -201,7 +210,7 @@ Config file (~/.sp_edit.conf, JSON) or env vars:
 
 import base64, gzip, json, os, subprocess, sys, time, random, string, uuid
 from pathlib import Path
-from datetime import date
+from datetime import date, datetime, timezone
 
 # ---------------------------------------------------------------------------
 # Config — ~/.sp_edit.conf (JSON) overrides defaults; env vars override that
@@ -720,6 +729,119 @@ def dump_archive(json_out=False):
     else:
         for r in rows:
             print(f"{r['title']:<50} project={r['project']}{r['_due']}  [{r['archive']}]  id={r['id']}")
+
+
+def dump_time_tracked(project_name=None, json_out=False):
+    parsed = _load_state()
+    state = parsed["state"]
+    projects = {p["id"]: p["title"] for p in state["project"]["entities"].values()}
+
+    # Collect all tasks: active + both archive buckets
+    all_tasks = list(state["task"]["entities"].values())
+    for archive_key in ("archiveYoung", "archiveOld"):
+        archive = parsed.get(archive_key, state.get(archive_key, {}))
+        all_tasks.extend(archive.get("task", {}).get("entities", {}).values())
+
+    rows = []
+    for t in all_tasks:
+        tod = t.get("timeSpentOnDay") or {}
+        if not tod:
+            continue
+        proj = projects.get(t.get("projectId"), "")
+        if project_name and proj.lower() != project_name.lower():
+            continue
+        for day, ms in sorted(tod.items()):
+            if ms:
+                rows.append({"date": day, "title": t["title"], "project": proj,
+                             "minutes": ms // 60000, "ms": ms, "id": t["id"]})
+
+    rows.sort(key=lambda r: (r["date"], r["project"], r["title"]))
+
+    if not rows:
+        print("[]" if json_out else "No time tracked.")
+        return
+
+    if json_out:
+        _print_or_json([{k: v for k, v in r.items() if k != "ms"} for r in rows], json_out)
+    else:
+        total_min = 0
+        cur_date = None
+        for r in rows:
+            if r["date"] != cur_date:
+                cur_date = r["date"]
+                print(f"\n{cur_date}")
+            print(f"  {r['minutes']:>4}m  {r['project']:<20} {r['title']}")
+            total_min += r["minutes"]
+        print(f"\nTotal: {total_min // 60}h {total_min % 60}m")
+
+
+def dump_time_log(project_name=None, date_str=None, json_out=False):
+    parsed = _load_state()
+    state = parsed["state"]
+    projects = {p["id"]: p["title"] for p in state["project"]["entities"].values()}
+
+    if date_str is None:
+        date_str = str(date.today())
+
+    # Build map of task IDs -> title+project for tasks with time on that day
+    task_meta = {}
+    for tid, t in state["task"]["entities"].items():
+        if t.get("timeSpentOnDay", {}).get(date_str):
+            proj = projects.get(t.get("projectId"), "")
+            if project_name and proj.lower() != project_name.lower():
+                continue
+            task_meta[tid] = {"title": t["title"], "project": proj}
+
+    if not task_meta:
+        print("[]" if json_out else "No time logged.")
+        return
+
+    # Collect KT ops per task for this date
+    from collections import defaultdict
+    kt_ops = defaultdict(list)
+    for op in parsed.get("recentOps", []):
+        if op.get("a") == "KT":
+            p = op["p"]["actionPayload"]
+            if p.get("date") == date_str and p.get("taskId") in task_meta:
+                kt_ops[p["taskId"]].append((op["t"], p["duration"]))
+
+    def ms_to_hm(ms):
+        return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).astimezone().strftime("%H:%M")
+
+    # Reconstruct sessions: merge ops with gap < 10 min
+    results = []
+    for tid, meta in task_meta.items():
+        ops_list = sorted(kt_ops[tid])
+        sessions = []
+        i = 0
+        while i < len(ops_list):
+            t, dur = ops_list[i]
+            seg_start = t - dur
+            seg_end = t
+            while i + 1 < len(ops_list) and ops_list[i + 1][0] - ops_list[i][0] < 10 * 60 * 1000:
+                i += 1
+                seg_end = ops_list[i][0]
+            sessions.append({"start_ms": seg_start, "end_ms": seg_end,
+                             "start": ms_to_hm(seg_start), "end": ms_to_hm(seg_end)})
+            i += 1
+        results.append({"title": meta["title"], "project": meta["project"],
+                        "date": date_str, "sessions": sessions})
+
+    results.sort(key=lambda r: r["sessions"][0]["start_ms"] if r["sessions"] else 0)
+
+    if json_out:
+        out = []
+        for r in results:
+            for s in r["sessions"]:
+                out.append({"date": r["date"], "project": r["project"], "title": r["title"],
+                            "start": s["start"], "end": s["end"]})
+        _print_or_json(out, json_out)
+    else:
+        for r in results:
+            if not r["sessions"]:
+                print(f"  {r['project']:<20} {r['title']}  (no session data)")
+            for s in r["sessions"]:
+                print(f"  {s['start']} → {s['end']}  [{r['project']}]  {r['title']}")
 
 
 def add_task(title, project_name="Inbox", due_date=str(date.today())):
@@ -2078,6 +2200,17 @@ if __name__ == "__main__":
         dump_counters(json_out)
     elif cmd == "dump-archive":
         dump_archive(json_out)
+    elif cmd == "dump-time-tracked":
+        dump_time_tracked(args[1] if len(args) > 1 else None, json_out)
+    elif cmd == "dump-time-log":
+        project_arg = None
+        date_arg = None
+        for a in args[1:]:
+            if len(a) == 10 and a[4] == "-" and a[7] == "-":
+                date_arg = a
+            else:
+                project_arg = a
+        dump_time_log(project_arg, date_arg, json_out)
     elif cmd == "add-subtask" and len(args) > 2:
         add_subtask(args[1], args[2])
     elif cmd == "complete-subtask" and len(args) > 1:
